@@ -9,6 +9,20 @@ set -euo pipefail
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 
+# Credential backend: auto, keychain, file, 1password, vault
+# Set via CCSWITCH_BACKEND env var or --backend flag
+# "auto" = keychain on macOS, file on Linux
+CCSWITCH_BACKEND="${CCSWITCH_BACKEND:-auto}"
+
+# 1Password settings
+CCSWITCH_OP_VAULT="${CCSWITCH_OP_VAULT:-Private}"
+CCSWITCH_OP_ITEM_PREFIX="${CCSWITCH_OP_ITEM_PREFIX:-Claude Code Account}"
+
+# HashiCorp Vault / OpenBao settings
+CCSWITCH_VAULT_ADDR="${CCSWITCH_VAULT_ADDR:-${VAULT_ADDR:-}}"
+CCSWITCH_VAULT_PATH="${CCSWITCH_VAULT_PATH:-secret/data/ccswitch}"
+CCSWITCH_VAULT_TOKEN="${CCSWITCH_VAULT_TOKEN:-${VAULT_TOKEN:-}}"
+
 # Container detection
 is_running_in_container() {
     # Check for Docker environment file
@@ -188,82 +202,213 @@ get_current_account() {
     echo "${email:-none}"
 }
 
-# Read credentials based on platform
+# Resolve effective backend (auto → keychain/file based on platform)
+_resolve_backend() {
+    if [[ "$CCSWITCH_BACKEND" == "auto" ]]; then
+        case "$(detect_platform)" in
+            macos) echo "keychain" ;;
+            *) echo "file" ;;
+        esac
+    else
+        echo "$CCSWITCH_BACKEND"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential Backend: Keychain (macOS)
+# ═══════════════════════════════════════════════════════════════════════════
+_keychain_read() {
+    local service="$1"
+    security find-generic-password -s "$service" -w 2>/dev/null || echo ""
+}
+
+_keychain_write() {
+    local service="$1" credentials="$2"
+    security add-generic-password -U -s "$service" -a "$USER" -w "$credentials" 2>/dev/null
+}
+
+_keychain_delete() {
+    local service="$1"
+    security delete-generic-password -s "$service" 2>/dev/null || true
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential Backend: File (Linux/WSL)
+# ═══════════════════════════════════════════════════════════════════════════
+_file_read() {
+    local filepath="$1"
+    if [[ -f "$filepath" ]]; then
+        cat "$filepath"
+    else
+        echo ""
+    fi
+}
+
+_file_write() {
+    local filepath="$1" credentials="$2"
+    mkdir -p "$(dirname "$filepath")"
+    printf '%s' "$credentials" > "$filepath"
+    chmod 600 "$filepath"
+}
+
+_file_delete() {
+    local filepath="$1"
+    rm -f "$filepath"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential Backend: 1Password
+# ═══════════════════════════════════════════════════════════════════════════
+_op_item_name() {
+    local account_label="$1"
+    echo "${CCSWITCH_OP_ITEM_PREFIX} - ${account_label}"
+}
+
+_op_read() {
+    local item_name="$1"
+    if ! command -v op &>/dev/null; then
+        echo ""
+        return
+    fi
+    op item get "$item_name" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
+}
+
+_op_write() {
+    local item_name="$1" credentials="$2"
+    if ! command -v op &>/dev/null; then
+        echo "Error: 1password-cli (op) not installed" >&2
+        return 1
+    fi
+    # Check if item exists
+    if op item get "$item_name" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
+        # Update existing item
+        op item edit "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+    else
+        # Create new item
+        op item create --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+    fi
+}
+
+_op_delete() {
+    local item_name="$1"
+    if command -v op &>/dev/null; then
+        op item delete "$item_name" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Credential Backend: HashiCorp Vault / OpenBao
+# ═══════════════════════════════════════════════════════════════════════════
+_vault_cmd() {
+    # Use bao if available (OpenBao), fall back to vault
+    if command -v bao &>/dev/null; then
+        echo "bao"
+    elif command -v vault &>/dev/null; then
+        echo "vault"
+    else
+        echo ""
+    fi
+}
+
+_vault_read() {
+    local key="$1"
+    local cmd
+    cmd=$(_vault_cmd)
+    if [[ -z "$cmd" ]]; then
+        echo ""
+        return
+    fi
+    VAULT_ADDR="$CCSWITCH_VAULT_ADDR" VAULT_TOKEN="$CCSWITCH_VAULT_TOKEN" \
+        "$cmd" kv get -field=credentials "${CCSWITCH_VAULT_PATH}/${key}" 2>/dev/null || echo ""
+}
+
+_vault_write() {
+    local key="$1" credentials="$2"
+    local cmd
+    cmd=$(_vault_cmd)
+    if [[ -z "$cmd" ]]; then
+        echo "Error: neither vault nor bao CLI installed" >&2
+        return 1
+    fi
+    VAULT_ADDR="$CCSWITCH_VAULT_ADDR" VAULT_TOKEN="$CCSWITCH_VAULT_TOKEN" \
+        "$cmd" kv put "${CCSWITCH_VAULT_PATH}/${key}" credentials="$credentials" &>/dev/null
+}
+
+_vault_delete() {
+    local key="$1"
+    local cmd
+    cmd=$(_vault_cmd)
+    if [[ -n "$cmd" ]]; then
+        VAULT_ADDR="$CCSWITCH_VAULT_ADDR" VAULT_TOKEN="$CCSWITCH_VAULT_TOKEN" \
+            "$cmd" kv delete "${CCSWITCH_VAULT_PATH}/${key}" &>/dev/null 2>&1 || true
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Unified Credential API
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Read active Claude Code credentials
 read_credentials() {
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo ""
-            ;;
-        linux|wsl)
-            if [[ -f "$HOME/.claude/.credentials.json" ]]; then
-                cat "$HOME/.claude/.credentials.json"
-            else
-                echo ""
-            fi
-            ;;
+    local backend
+    backend=$(_resolve_backend)
+    case "$backend" in
+        keychain)  _keychain_read "Claude Code-credentials" ;;
+        file)      _file_read "$HOME/.claude/.credentials.json" ;;
+        1password) _op_read "$(_op_item_name "active")" ;;
+        vault)     _vault_read "active" ;;
     esac
 }
 
-# Write credentials based on platform
+# Write active Claude Code credentials
 write_credentials() {
     local credentials="$1"
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security add-generic-password -U -s "Claude Code-credentials" -a "$USER" -w "$credentials" 2>/dev/null
-            ;;
-        linux|wsl)
-            mkdir -p "$HOME/.claude"
-            printf '%s' "$credentials" > "$HOME/.claude/.credentials.json"
-            chmod 600 "$HOME/.claude/.credentials.json"
-            ;;
+    local backend
+    backend=$(_resolve_backend)
+    case "$backend" in
+        keychain)  _keychain_write "Claude Code-credentials" "$credentials" ;;
+        file)      _file_write "$HOME/.claude/.credentials.json" "$credentials" ;;
+        1password) _op_write "$(_op_item_name "active")" "$credentials" ;;
+        vault)     _vault_write "active" "$credentials" ;;
     esac
 }
 
-# Read account credentials from backup
+# Read per-account backup credentials
 read_account_credentials() {
-    local account_num="$1"
-    local email="$2"
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security find-generic-password -s "Claude Code-Account-${account_num}-${email}" -w 2>/dev/null || echo ""
-            ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            if [[ -f "$cred_file" ]]; then
-                cat "$cred_file"
-            else
-                echo ""
-            fi
-            ;;
+    local account_num="$1" email="$2"
+    local backend
+    backend=$(_resolve_backend)
+    case "$backend" in
+        keychain)  _keychain_read "Claude Code-Account-${account_num}-${email}" ;;
+        file)      _file_read "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json" ;;
+        1password) _op_read "$(_op_item_name "${account_num}-${email}")" ;;
+        vault)     _vault_read "account-${account_num}-${email}" ;;
     esac
 }
 
-# Write account credentials to backup
+# Write per-account backup credentials
 write_account_credentials() {
-    local account_num="$1"
-    local email="$2"
-    local credentials="$3"
-    local platform
-    platform=$(detect_platform)
-    
-    case "$platform" in
-        macos)
-            security add-generic-password -U -s "Claude Code-Account-${account_num}-${email}" -a "$USER" -w "$credentials" 2>/dev/null
-            ;;
-        linux|wsl)
-            local cred_file="$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            printf '%s' "$credentials" > "$cred_file"
-            chmod 600 "$cred_file"
-            ;;
+    local account_num="$1" email="$2" credentials="$3"
+    local backend
+    backend=$(_resolve_backend)
+    case "$backend" in
+        keychain)  _keychain_write "Claude Code-Account-${account_num}-${email}" "$credentials" ;;
+        file)      _file_write "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json" "$credentials" ;;
+        1password) _op_write "$(_op_item_name "${account_num}-${email}")" "$credentials" ;;
+        vault)     _vault_write "account-${account_num}-${email}" "$credentials" ;;
+    esac
+}
+
+# Delete per-account backup credentials
+delete_account_credentials() {
+    local account_num="$1" email="$2"
+    local backend
+    backend=$(_resolve_backend)
+    case "$backend" in
+        keychain)  _keychain_delete "Claude Code-Account-${account_num}-${email}" ;;
+        file)      _file_delete "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json" ;;
+        1password) _op_delete "$(_op_item_name "${account_num}-${email}")" ;;
+        vault)     _vault_delete "account-${account_num}-${email}" ;;
     esac
 }
 
@@ -442,7 +587,10 @@ cmd_remove_account() {
         exit 0
     fi
     
-    # Remove backup files
+    # Remove backup credentials via backend
+    delete_account_credentials "$account_num" "$email"
+
+    # Legacy cleanup (in case of backend migration)
     local platform
     platform=$(detect_platform)
     case "$platform" in
@@ -1105,22 +1253,18 @@ cmd_usage_all() {
             echo -ne "  \033[0;90mQuerying #${num} ${email}...\033[0m "
         fi
 
-        # Get OAuth token from keychain backup (or active credentials)
+        # Get OAuth token via credential backend
         token=""
         sub_type=""
-        if [[ "$platform" == "macos" ]]; then
-            local service
-            if [[ "$num" == "$active_num" ]]; then
-                service="Claude Code-credentials"
-            else
-                service="Claude Code-Account-${num}-${email}"
-            fi
-            local cred_json
-            cred_json=$(security find-generic-password -s "$service" -w 2>/dev/null || echo "")
-            if [[ -n "$cred_json" ]]; then
-                token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
-                sub_type=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('subscriptionType',''))" 2>/dev/null)
-            fi
+        local cred_json
+        if [[ "$num" == "$active_num" ]]; then
+            cred_json=$(read_credentials)
+        else
+            cred_json=$(read_account_credentials "$num" "$email")
+        fi
+        if [[ -n "$cred_json" ]]; then
+            token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
+            sub_type=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('subscriptionType',''))" 2>/dev/null)
         fi
 
         if [[ -z "$token" ]]; then
@@ -1310,16 +1454,14 @@ cmd_env() {
     local platform
     platform=$(detect_platform)
 
-    # Get OAuth credentials for this account
+    # Get OAuth credentials for this account via backend
     local cred_json=""
-    if [[ "$platform" == "macos" ]]; then
-        local active_num
-        active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-        if [[ "$account_num" == "$active_num" ]]; then
-            cred_json=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo "")
-        else
-            cred_json=$(security find-generic-password -s "Claude Code-Account-${account_num}-${account_email}" -w 2>/dev/null || echo "")
-        fi
+    local active_num
+    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    if [[ "$account_num" == "$active_num" ]]; then
+        cred_json=$(read_credentials)
+    else
+        cred_json=$(read_account_credentials "$account_num" "$account_email")
     fi
 
     if [[ -z "$cred_json" ]]; then
@@ -1390,6 +1532,13 @@ show_usage() {
     echo "  --use-zai                        Switch to z.ai API (ztaylor@stigen.ai)"
     echo "  --use-anthropic                  Revert to default Anthropic API"
     echo "  --api-status                     Show current API configuration"
+    echo ""
+    echo "Credential Backend:"
+    echo "  --backend                        Show current credential backend"
+    echo "  CCSWITCH_BACKEND=<backend>       Set backend: auto, keychain, file, 1password, vault"
+    echo "  CCSWITCH_OP_VAULT=<vault>        1Password vault (default: Private)"
+    echo "  CCSWITCH_VAULT_ADDR=<url>        Vault/OpenBao address"
+    echo "  CCSWITCH_VAULT_PATH=<path>       Vault KV path (default: secret/data/ccswitch)"
     echo ""
     echo "  --help                           Show this help message"
     echo ""
@@ -1462,6 +1611,15 @@ main() {
         --env)
             shift
             cmd_env "$@"
+            ;;
+        --backend)
+            local b
+            b=$(_resolve_backend)
+            echo "Backend: $b (CCSWITCH_BACKEND=${CCSWITCH_BACKEND})"
+            case "$b" in
+                1password) echo "  Vault: $CCSWITCH_OP_VAULT"; echo "  Prefix: $CCSWITCH_OP_ITEM_PREFIX" ;;
+                vault) echo "  Addr: ${CCSWITCH_VAULT_ADDR:-<not set>}"; echo "  Path: $CCSWITCH_VAULT_PATH" ;;
+            esac
             ;;
         --help)
             show_usage
