@@ -1230,6 +1230,102 @@ for line in results:
 " 2>/dev/null || echo "Could not render usage data"
 }
 
+# Output eval-able exports to use a specific account in this shell only
+# Sets CLAUDE_CONFIG_DIR to an isolated per-account directory with symlinks to shared config
+cmd_env() {
+    local target="${1:-}"
+    if [[ -z "$target" ]]; then
+        echo "echo 'Usage: eval \"\$(ccswitch --env <account_number|email>)\"'" >&2
+        echo "echo 'Unset: eval \"\$(ccswitch --env --unset)\"'" >&2
+        return 1
+    fi
+
+    # Handle --unset
+    if [[ "$target" == "--unset" ]]; then
+        echo "unset CLAUDE_CONFIG_DIR"
+        echo "echo '[ccswitch] Reverted to global account'" >&2
+        return 0
+    fi
+
+    # Resolve account number
+    local account_num=""
+    local account_email=""
+
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        account_num="$target"
+        account_email=$(jq -r ".accounts[\"$account_num\"].email // empty" "$SEQUENCE_FILE")
+    else
+        # Search by email
+        account_num=$(jq -r ".accounts | to_entries[] | select(.value.email == \"$target\") | .key" "$SEQUENCE_FILE")
+        account_email="$target"
+    fi
+
+    if [[ -z "$account_num" ]] || [[ -z "$account_email" ]]; then
+        echo "echo 'Error: Account not found: $target'" >&2
+        return 1
+    fi
+
+    local config_dir="$HOME/.claude-env-${account_num}"
+    local shared_dir="$HOME/.claude"
+    local platform
+    platform=$(detect_platform)
+
+    # Get OAuth credentials for this account
+    local cred_json=""
+    if [[ "$platform" == "macos" ]]; then
+        local active_num
+        active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        if [[ "$account_num" == "$active_num" ]]; then
+            cred_json=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || echo "")
+        else
+            cred_json=$(security find-generic-password -s "Claude Code-Account-${account_num}-${account_email}" -w 2>/dev/null || echo "")
+        fi
+    fi
+
+    if [[ -z "$cred_json" ]]; then
+        echo "echo 'Error: No credentials found for account #${account_num} (${account_email})'" >&2
+        return 1
+    fi
+
+    # Create isolated config dir with symlinks to shared config
+    mkdir -p "$config_dir"
+
+    # Symlink shared resources (read-only is fine)
+    for item in settings.json CLAUDE.md mcp_servers.json hooks skills agents plugins commands scripts; do
+        if [[ -e "$shared_dir/$item" ]] && [[ ! -e "$config_dir/$item" ]]; then
+            ln -sf "$shared_dir/$item" "$config_dir/$item"
+        fi
+    done
+
+    # Create projects dir (must be writable, separate per account)
+    mkdir -p "$config_dir/projects"
+
+    # Write credentials file for this account (CLAUDE_CONFIG_DIR uses file-based creds)
+    echo "$cred_json" > "$config_dir/.credentials.json"
+    chmod 600 "$config_dir/.credentials.json"
+
+    # Write the oauthAccount identity so Claude knows which account this is
+    local oauth_account
+    oauth_account=$(jq -r ".accounts[\"$account_num\"]" "$SEQUENCE_FILE")
+    # Get the full config backup if available
+    local config_backup="$BACKUP_DIR/configs/.claude-config-${account_num}-${account_email}.json"
+    if [[ -f "$config_backup" ]]; then
+        # Extract oauthAccount from backup and write a minimal .claude.json
+        python3 -c "
+import json
+backup = json.load(open('$config_backup'))
+oauth = backup.get('oauthAccount', {})
+# Minimal .claude.json with just the account identity
+out = {'oauthAccount': oauth, 'hasCompletedOnboarding': True}
+json.dump(out, open('$config_dir/.claude.json', 'w'), indent=2)
+" 2>/dev/null
+    fi
+
+    # Output the export statement
+    echo "export CLAUDE_CONFIG_DIR=\"$config_dir\""
+    echo "echo '[ccswitch] Shell bound to #${account_num} ${account_email} (CLAUDE_CONFIG_DIR=$config_dir)'" >&2
+}
+
 # Show help
 show_usage() {
     echo "Multi-Account Switcher for Claude Code"
@@ -1242,6 +1338,8 @@ show_usage() {
     echo "  --list                           List all managed accounts"
     echo "  --switch                         Rotate to next account in sequence"
     echo "  --switch-to <num|email>          Switch to specific account number or email"
+    echo "  --env <num|email>               Output exports for per-shell account (use with eval)"
+    echo "  --env --unset                   Revert shell to global account"
     echo ""
     echo "Usage Monitoring:"
     echo "  --usage                          Show 5h block and weekly usage limits"
@@ -1265,6 +1363,8 @@ show_usage() {
     echo "  $0 --remove-account user@example.com"
     echo "  $0 --use-zai                     # Use z.ai API with 1Password auth"
     echo "  $0 --use-anthropic               # Revert to default API"
+    echo "  eval \"\$($0 --env 2)\"             # Bind this shell to account 2"
+    echo "  eval \"\$($0 --env --unset)\"       # Revert to global account"
 }
 
 # Main script logic
@@ -1317,6 +1417,10 @@ main() {
             ;;
         --usage-all)
             cmd_usage_all
+            ;;
+        --env)
+            shift
+            cmd_env "$@"
             ;;
         --help)
             show_usage
