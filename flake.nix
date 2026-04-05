@@ -29,6 +29,8 @@
 
             nativeBuildInputs = [ pkgs.makeWrapper ];
 
+            dontBuild = true;
+
             installPhase = ''
               runHook preInstall
               install -Dm755 ccswitch.sh $out/bin/ccswitch
