@@ -1078,6 +1078,11 @@ else:
 
 # Show real server-side usage for all accounts via OAuth API
 cmd_usage_all() {
+    local json_mode="false"
+    if [[ "${1:-}" == "--json" ]]; then
+        json_mode="true"
+    fi
+
     local account_nums
     account_nums=$(jq -r '.accounts | keys[]' "$SEQUENCE_FILE" | sort -n)
     local active_num
@@ -1085,8 +1090,10 @@ cmd_usage_all() {
     local platform
     platform=$(detect_platform)
 
-    echo -e "\033[1mAll Accounts - Usage\033[0m"
-    echo ""
+    if [[ "$json_mode" == "false" ]]; then
+        echo -e "\033[1mAll Accounts - Usage\033[0m"
+        echo ""
+    fi
 
     # Collect results: query OAuth usage API per account (no switching needed)
     local results=""
@@ -1094,7 +1101,9 @@ cmd_usage_all() {
         local email token usage_json h5 d7 h5_reset d7_reset sub_type
         email=$(jq -r ".accounts[\"$num\"].email" "$SEQUENCE_FILE")
 
-        echo -ne "  \033[0;90mQuerying #${num} ${email}...\033[0m "
+        if [[ "$json_mode" == "false" ]]; then
+            echo -ne "  \033[0;90mQuerying #${num} ${email}...\033[0m "
+        fi
 
         # Get OAuth token from keychain backup (or active credentials)
         token=""
@@ -1115,7 +1124,7 @@ cmd_usage_all() {
         fi
 
         if [[ -z "$token" ]]; then
-            echo -e "\033[0;31m✗ no token\033[0m"
+            [[ "$json_mode" == "false" ]] && echo -e "\033[0;31m✗ no token\033[0m"
             results="${results}${num}|${email}|—|—|—|—|${sub_type}|error
 "
             continue
@@ -1128,7 +1137,7 @@ cmd_usage_all() {
 
         if [[ -z "$usage_json" ]] || echo "$usage_json" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); sys.exit(0 if 'five_hour' in d else 1)" 2>/dev/null; then
             if [[ -z "$usage_json" ]]; then
-                echo -e "\033[0;31m✗ API error\033[0m"
+                [[ "$json_mode" == "false" ]] && echo -e "\033[0;31m✗ API error\033[0m"
                 results="${results}${num}|${email}|—|—|—|—|${sub_type}|error
 "
                 continue
@@ -1141,15 +1150,46 @@ h5 = d.get('five_hour', {})
 d7 = d.get('seven_day', {})
 print(f\"{h5.get('utilization', '—')}|{d7.get('utilization', '—')}|{h5.get('resets_at', '')}|{d7.get('resets_at', '')}\")
 " 2>/dev/null)
-            echo -e "\033[0;32m✓\033[0m"
+            [[ "$json_mode" == "false" ]] && echo -e "\033[0;32m✓\033[0m"
             results="${results}${num}|${email}|${parsed}|${sub_type}|ok
 "
         else
-            echo -e "\033[0;31m✗ token expired\033[0m"
+            [[ "$json_mode" == "false" ]] && echo -e "\033[0;31m✗ token expired\033[0m"
             results="${results}${num}|${email}|—|—|—|—|${sub_type}|expired
 "
         fi
     done
+
+    # JSON output mode
+    if [[ "$json_mode" == "true" ]]; then
+        python3 -c "
+import json, sys
+results = '''$results'''.strip().split('\n')
+active_num = '$active_num'
+accounts = []
+for line in results:
+    if not line.strip(): continue
+    parts = line.split('|')
+    if len(parts) < 8: continue
+    num, email, h5_str, d7_str, h5_reset, d7_reset, sub_type, status = parts
+    acct = {
+        'account': int(num),
+        'email': email,
+        'active': num == active_num,
+        'subscription': sub_type or None,
+        'status': status,
+    }
+    if status == 'ok':
+        try:
+            acct['five_hour'] = {'utilization': float(h5_str), 'resets_at': h5_reset}
+            acct['seven_day'] = {'utilization': float(d7_str), 'resets_at': d7_reset}
+        except:
+            pass
+    accounts.append(acct)
+print(json.dumps({'accounts': accounts}, indent=2))
+" 2>/dev/null
+        return
+    fi
 
     echo ""
 
@@ -1343,7 +1383,7 @@ show_usage() {
     echo ""
     echo "Usage Monitoring:"
     echo "  --usage                          Show 5h block and weekly usage limits"
-    echo "  --usage-all                      Show weekly limits for all accounts"
+    echo "  --usage-all [--json]             Show usage for all accounts (optional JSON output)"
     echo "  --set-limit <tokens>             Set weekly token limit for current account (e.g. 6700M)"
     echo ""
     echo "API Configuration:"
@@ -1416,7 +1456,8 @@ main() {
             cmd_set_limit "$@"
             ;;
         --usage-all)
-            cmd_usage_all
+            shift
+            cmd_usage_all "$@"
             ;;
         --env)
             shift
