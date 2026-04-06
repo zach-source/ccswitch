@@ -521,6 +521,63 @@ refresh_account_token() {
     return 0
 }
 
+# Save current active credentials to the backup slot
+# Run this after logging in or re-authenticating to capture fresh tokens
+cmd_save() {
+    local active_num
+    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    local email
+    email=$(jq -r ".accounts[\"$active_num\"].email" "$SEQUENCE_FILE")
+    local current_email
+    current_email=$(get_current_account)
+
+    if [[ "$current_email" == "none" ]]; then
+        echo "Error: No active Claude account found"
+        return 1
+    fi
+
+    # Verify identity matches
+    if [[ "$current_email" != "$email" ]]; then
+        echo "Warning: Active account ($current_email) doesn't match expected ($email)"
+        echo "The active keychain may have been updated by a different account login."
+        echo "Updating account mapping..."
+        # Find which account this email belongs to, or update the active one
+        local matching_num
+        matching_num=$(jq -r --arg email "$current_email" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ -n "$matching_num" ]]; then
+            active_num="$matching_num"
+            email="$current_email"
+            # Update activeAccountNumber
+            local updated
+            updated=$(jq --arg num "$active_num" '.activeAccountNumber = ($num | tonumber)' "$SEQUENCE_FILE")
+            write_json "$SEQUENCE_FILE" "$updated"
+        fi
+    fi
+
+    local creds config_content
+    creds=$(read_credentials)
+    config_content=$(cat "$(get_claude_config_path)")
+
+    if [[ -z "$creds" ]]; then
+        echo "Error: No credentials in active slot"
+        return 1
+    fi
+
+    write_account_credentials "$active_num" "$email" "$creds"
+    write_account_config "$active_num" "$email" "$config_content"
+
+    local expires_h
+    expires_h=$(echo "$creds" | python3 -c "
+import sys, json, time
+d = json.loads(sys.stdin.read())
+exp = d.get('claudeAiOauth', {}).get('expiresAt', 0)
+h = (exp - time.time() * 1000) / 3600000
+print(f'{h:.1f}')
+" 2>/dev/null)
+
+    echo "Saved credentials for #${active_num} ${email} (expires in ${expires_h}h)"
+}
+
 # Refresh all accounts with expired tokens
 cmd_refresh_all() {
     local account_nums
@@ -1759,6 +1816,7 @@ show_usage() {
     echo "  --list                           List all managed accounts"
     echo "  --switch                         Rotate to next account in sequence"
     echo "  --switch-to <num|email>          Switch to specific account number or email"
+    echo "  --save                           Save active credentials to backup (after login/re-auth)"
     echo "  --env <num|email>               Output exports for per-shell account (use with eval)"
     echo "  --env --creds-file <path>       Use a credentials file (mountable secret)"
     echo "  --env --creds-file <p> --config-dir <d>  Custom config dir + creds file"
@@ -1840,6 +1898,9 @@ main() {
             ;;
         --api-status)
             cmd_api_status
+            ;;
+        --save)
+            cmd_save
             ;;
         --usage)
             cmd_usage
