@@ -8,6 +8,13 @@ set -euo pipefail
 # Configuration
 readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
+readonly SCHEMA_VERSION=2
+
+# Compute stable 8-char hex ID from email (SHA-256 prefix)
+hash_email() {
+    local email="$1"
+    echo -n "$email" | shasum -a 256 | cut -c1-8
+}
 
 # Credential backend: auto, keychain, file, 1password, vault
 # Set via CCSWITCH_BACKEND env var or --backend flag
@@ -101,21 +108,54 @@ validate_email() {
     fi
 }
 
-# Account identifier resolution function
+# Resolve account identifier (hash, email, or numeric index for backward compat) to hash
 resolve_account_identifier() {
     local identifier="$1"
-    if [[ "$identifier" =~ ^[0-9]+$ ]]; then
-        echo "$identifier"  # It's a number
-    else
-        # Look up account number by email
-        local account_num
-        account_num=$(jq -r --arg email "$identifier" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
-        if [[ -n "$account_num" && "$account_num" != "null" ]]; then
-            echo "$account_num"
-        else
-            echo ""
+    [[ ! -f "$SEQUENCE_FILE" ]] && { echo ""; return; }
+
+    # Case 1: Already a hash (8 hex chars) - verify it exists
+    if [[ "$identifier" =~ ^[0-9a-f]{8}$ ]]; then
+        if jq -e --arg id "$identifier" '.accounts[$id]' "$SEQUENCE_FILE" >/dev/null 2>&1; then
+            echo "$identifier"
+            return
         fi
     fi
+
+    # Case 2: Email address - hash it and verify
+    if [[ "$identifier" == *@* ]]; then
+        local hash
+        hash=$(hash_email "$identifier")
+        if jq -e --arg id "$hash" '.accounts[$id]' "$SEQUENCE_FILE" >/dev/null 2>&1; then
+            echo "$hash"
+            return
+        fi
+        # Not found by hash - scan accounts for matching email (legacy/migration)
+        local found
+        found=$(jq -r --arg email "$identifier" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ -n "$found" && "$found" != "null" ]]; then
+            echo "$found"
+            return
+        fi
+    fi
+
+    # Case 3: Numeric index into sequence (backward compat) - 1-based
+    if [[ "$identifier" =~ ^[0-9]+$ ]]; then
+        local idx=$((identifier - 1))
+        local found
+        found=$(jq -r --arg i "$idx" '.sequence[$i | tonumber] // empty' "$SEQUENCE_FILE" 2>/dev/null)
+        if [[ -n "$found" && "$found" != "null" ]]; then
+            echo "$found"
+            return
+        fi
+    fi
+
+    echo ""
+}
+
+# Get the email for a given account ID
+get_account_email() {
+    local id="$1"
+    jq -r --arg id "$id" '.accounts[$id].email // empty' "$SEQUENCE_FILE" 2>/dev/null
 }
 
 # Safe JSON write with validation
@@ -486,7 +526,7 @@ refresh_account_token() {
     local email
     email=$(jq -r ".accounts[\"$account_num\"].email // empty" "$SEQUENCE_FILE")
     local active_num
-    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    active_num=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
 
     # Read current credentials
     local cred_json
@@ -524,10 +564,11 @@ refresh_account_token() {
 # Save current active credentials to the backup slot
 # Run this after logging in or re-authenticating to capture fresh tokens
 cmd_save() {
-    local active_num
-    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    local email
-    email=$(jq -r ".accounts[\"$active_num\"].email" "$SEQUENCE_FILE")
+    local active_id
+    active_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+    local expected_email
+    expected_email=$(get_account_email "$active_id")
+
     local current_email
     current_email=$(get_current_account)
 
@@ -536,21 +577,28 @@ cmd_save() {
         return 1
     fi
 
-    # Verify identity matches
-    if [[ "$current_email" != "$email" ]]; then
-        echo "Warning: Active account ($current_email) doesn't match expected ($email)"
+    local target_id="$active_id"
+    local target_email="$expected_email"
+
+    # Verify identity matches the expected active account
+    if [[ "$current_email" != "$expected_email" ]]; then
+        echo "Warning: Active account ($current_email) doesn't match expected ($expected_email)"
         echo "The active keychain may have been updated by a different account login."
-        echo "Updating account mapping..."
-        # Find which account this email belongs to, or update the active one
-        local matching_num
-        matching_num=$(jq -r --arg email "$current_email" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
-        if [[ -n "$matching_num" ]]; then
-            active_num="$matching_num"
-            email="$current_email"
-            # Update activeAccountNumber
+
+        # Find account by current email (compute hash)
+        local current_hash
+        current_hash=$(hash_email "$current_email")
+        if jq -e --arg id "$current_hash" '.accounts[$id]' "$SEQUENCE_FILE" >/dev/null 2>&1; then
+            target_id="$current_hash"
+            target_email="$current_email"
+            # Update activeAccountId to match reality
             local updated
-            updated=$(jq --arg num "$active_num" '.activeAccountNumber = ($num | tonumber)' "$SEQUENCE_FILE")
+            updated=$(jq --arg id "$target_id" '.activeAccountId = $id' "$SEQUENCE_FILE")
             write_json "$SEQUENCE_FILE" "$updated"
+            echo "Updated active account to ${target_id} (${target_email})"
+        else
+            echo "Error: Current account ${current_email} is not managed. Run --add-account first."
+            return 1
         fi
     fi
 
@@ -563,8 +611,8 @@ cmd_save() {
         return 1
     fi
 
-    write_account_credentials "$active_num" "$email" "$creds"
-    write_account_config "$active_num" "$email" "$config_content"
+    write_account_credentials "$target_id" "$target_email" "$creds"
+    write_account_config "$target_id" "$target_email" "$config_content"
 
     local expires_h
     expires_h=$(echo "$creds" | python3 -c "
@@ -575,13 +623,13 @@ h = (exp - time.time() * 1000) / 3600000
 print(f'{h:.1f}')
 " 2>/dev/null)
 
-    echo "Saved credentials for #${active_num} ${email} (expires in ${expires_h}h)"
+    echo "Saved credentials for ${target_id} (${target_email}, expires in ${expires_h}h)"
 }
 
 # Refresh all accounts with expired tokens
 cmd_refresh_all() {
     local account_nums
-    account_nums=$(jq -r '.accounts | keys[]' "$SEQUENCE_FILE" | sort -n)
+    account_nums=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
 
     echo "Refreshing expired tokens..."
     echo ""
@@ -592,7 +640,7 @@ cmd_refresh_all() {
         echo -n "  #${num} ${email}: "
 
         local active_num
-        active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        active_num=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
         local cred_json
         if [[ "$num" == "$active_num" ]]; then
             cred_json=$(read_credentials)
@@ -657,25 +705,160 @@ write_account_config() {
 init_sequence_file() {
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         local init_content='{
-  "activeAccountNumber": null,
+  "version": '$SCHEMA_VERSION',
+  "activeAccountId": null,
   "lastUpdated": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",
   "sequence": [],
   "accounts": {}
 }'
         write_json "$SEQUENCE_FILE" "$init_content"
     fi
+
+    # Auto-migrate v1 schema (numeric keys) to v2 schema (hash keys)
+    migrate_v1_to_v2
 }
 
-# Get next account number
-get_next_account_number() {
-    if [[ ! -f "$SEQUENCE_FILE" ]]; then
-        echo "1"
-        return
-    fi
-    
-    local max_num
-    max_num=$(jq -r '.accounts | keys | map(tonumber) | max // 0' "$SEQUENCE_FILE")
-    echo $((max_num + 1))
+# Migrate from v1 (numeric account keys) to v2 (email-hash keys)
+migrate_v1_to_v2() {
+    [[ ! -f "$SEQUENCE_FILE" ]] && return
+
+    local version
+    version=$(jq -r '.version // 1' "$SEQUENCE_FILE" 2>/dev/null)
+    [[ "$version" == "$SCHEMA_VERSION" ]] && return
+
+    # Detect v1: has numeric account keys like "1", "2", "3"
+    local has_numeric
+    has_numeric=$(jq -r '.accounts | keys | map(select(test("^[0-9]+$"))) | length' "$SEQUENCE_FILE" 2>/dev/null)
+    [[ "$has_numeric" == "0" ]] && return
+
+    echo "Migrating sequence.json from v1 to v2 (email-hash keys)..."
+
+    # Build the new structure with hash keys
+    # Note: we read both old (activeAccountNumber) and new (activeAccountId) field names
+    # because sed-based refactoring may have renamed the field but kept old data
+    local accounts_v1 active_v1 sequence_v1
+    accounts_v1=$(jq -c '.accounts' "$SEQUENCE_FILE")
+    active_v1=$(jq -r '.activeAccountNumber // .activeAccountId // empty' "$SEQUENCE_FILE")
+    sequence_v1=$(jq -c '.sequence // []' "$SEQUENCE_FILE")
+
+    # Python handles the restructuring + keychain/file renames
+    local platform
+    platform=$(detect_platform)
+    python3 -c "
+import json, sys, hashlib, subprocess, os
+
+BACKUP_DIR = '$BACKUP_DIR'
+SEQUENCE_FILE = '$SEQUENCE_FILE'
+PLATFORM = '$platform'
+
+with open(SEQUENCE_FILE) as f:
+    data = json.load(f)
+
+def h(email):
+    return hashlib.sha256(email.encode()).hexdigest()[:8]
+
+old_accounts = data.get('accounts', {})
+new_accounts = {}
+num_to_hash = {}
+
+# Convert accounts dict from numeric to hash keys
+for num_key, acct in old_accounts.items():
+    email = acct.get('email', '')
+    if not email:
+        continue
+    hash_id = h(email)
+    num_to_hash[num_key] = hash_id
+    new_accounts[hash_id] = acct
+
+# Convert sequence array
+old_sequence = data.get('sequence', [])
+new_sequence = []
+for item in old_sequence:
+    key = str(item)
+    if key in num_to_hash:
+        new_sequence.append(num_to_hash[key])
+
+# Convert activeAccountNumber/Id to activeAccountId
+active_num = data.get('activeAccountNumber') or data.get('activeAccountId')
+active_id = None
+if active_num is not None:
+    # If it's already a hash (migrated), keep it. If numeric, look up hash.
+    if str(active_num) in num_to_hash:
+        active_id = num_to_hash[str(active_num)]
+    elif str(active_num) in new_accounts:
+        active_id = str(active_num)
+
+# Convert switchLog (from/to were numbers)
+old_log = data.get('switchLog', [])
+new_log = []
+for entry in old_log:
+    from_num = str(entry.get('from', ''))
+    to_num = str(entry.get('to', ''))
+    new_log.append({
+        'from': num_to_hash.get(from_num, from_num),
+        'to': num_to_hash.get(to_num, to_num),
+        'at': entry.get('at', ''),
+    })
+
+# Build new v2 structure
+new_data = {
+    'version': 2,
+    'activeAccountId': active_id,
+    'lastUpdated': data.get('lastUpdated', ''),
+    'sequence': new_sequence,
+    'accounts': new_accounts,
+}
+if new_log:
+    new_data['switchLog'] = new_log
+
+with open(SEQUENCE_FILE, 'w') as f:
+    json.dump(new_data, f, indent=2)
+
+# Rename keychain entries and config backup files
+for num_key, hash_id in num_to_hash.items():
+    email = new_accounts[hash_id].get('email', '')
+    old_name = f'Claude Code-Account-{num_key}-{email}'
+    new_name = f'Claude Code-Account-{hash_id}-{email}'
+
+    if PLATFORM == 'macos':
+        # Read old credential
+        try:
+            r = subprocess.run(['security', 'find-generic-password', '-s', old_name, '-w'],
+                             capture_output=True, text=True)
+            if r.returncode == 0 and r.stdout.strip():
+                cred = r.stdout.strip()
+                # Write to new name
+                subprocess.run(['security', 'add-generic-password', '-U', '-s', new_name,
+                              '-a', os.environ.get('USER', ''), '-w', cred],
+                             capture_output=True)
+                # Delete old
+                subprocess.run(['security', 'delete-generic-password', '-s', old_name],
+                             capture_output=True)
+                print(f'  Renamed keychain: {old_name} -> {new_name}')
+        except Exception as e:
+            print(f'  Failed to migrate keychain for {email}: {e}')
+    else:
+        old_file = f'{BACKUP_DIR}/credentials/.claude-credentials-{num_key}-{email}.json'
+        new_file = f'{BACKUP_DIR}/credentials/.claude-credentials-{hash_id}-{email}.json'
+        if os.path.exists(old_file):
+            os.rename(old_file, new_file)
+            print(f'  Renamed file: {old_file} -> {new_file}')
+
+    # Rename config backup file
+    old_config = f'{BACKUP_DIR}/configs/.claude-config-{num_key}-{email}.json'
+    new_config = f'{BACKUP_DIR}/configs/.claude-config-{hash_id}-{email}.json'
+    if os.path.exists(old_config):
+        os.rename(old_config, new_config)
+        print(f'  Renamed config: {old_config} -> {new_config}')
+
+print(f'Migration complete: {len(num_to_hash)} accounts converted')
+" 2>&1
+}
+
+# Get the hash ID for a new account (deterministic from email)
+get_next_account_id() {
+    local email="$1"
+    hash_email "$email"
 }
 
 # Check if account exists by email
@@ -706,43 +889,43 @@ cmd_add_account() {
         exit 0
     fi
     
-    local account_num
-    account_num=$(get_next_account_number)
-    
+    local account_id
+    account_id=$(hash_email "$current_email")
+
     # Backup current credentials and config
     local current_creds current_config
     current_creds=$(read_credentials)
     current_config=$(cat "$(get_claude_config_path)")
-    
+
     if [[ -z "$current_creds" ]]; then
         echo "Error: No credentials found for current account"
         exit 1
     fi
-    
+
     # Get account UUID
     local account_uuid
     account_uuid=$(jq -r '.oauthAccount.accountUuid' "$(get_claude_config_path)")
-    
+
     # Store backups
-    write_account_credentials "$account_num" "$current_email" "$current_creds"
-    write_account_config "$account_num" "$current_email" "$current_config"
-    
+    write_account_credentials "$account_id" "$current_email" "$current_creds"
+    write_account_config "$account_id" "$current_email" "$current_config"
+
     # Update sequence.json
     local updated_sequence
-    updated_sequence=$(jq --arg num "$account_num" --arg email "$current_email" --arg uuid "$account_uuid" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .accounts[$num] = {
+    updated_sequence=$(jq --arg id "$account_id" --arg email "$current_email" --arg uuid "$account_uuid" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .accounts[$id] = {
             email: $email,
             uuid: $uuid,
             added: $now
         } |
-        .sequence += [$num | tonumber] |
-        .activeAccountNumber = ($num | tonumber) |
+        .sequence += [$id] |
+        .activeAccountId = $id |
         .lastUpdated = $now
     ' "$SEQUENCE_FILE")
-    
+
     write_json "$SEQUENCE_FILE" "$updated_sequence"
-    
-    echo "Added Account $account_num: $current_email"
+
+    echo "Added account ${account_id}: ${current_email}"
 }
 
 # Remove account
@@ -753,84 +936,52 @@ cmd_remove_account() {
     fi
     
     local identifier="$1"
-    local account_num
-    
+    local account_id
+
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         echo "Error: No accounts are managed yet"
         exit 1
     fi
-    
-    # Handle email vs numeric identifier
-    if [[ "$identifier" =~ ^[0-9]+$ ]]; then
-        account_num="$identifier"
-    else
-        # Validate email format
-        if ! validate_email "$identifier"; then
-            echo "Error: Invalid email format: $identifier"
-            exit 1
-        fi
-        
-        # Resolve email to account number
-        account_num=$(resolve_account_identifier "$identifier")
-        if [[ -z "$account_num" ]]; then
-            echo "Error: No account found with email: $identifier"
-            exit 1
-        fi
-    fi
-    
-    local account_info
-    account_info=$(jq -r --arg num "$account_num" '.accounts[$num] // empty' "$SEQUENCE_FILE")
-    
-    if [[ -z "$account_info" ]]; then
-        echo "Error: Account-$account_num does not exist"
+
+    account_id=$(resolve_account_identifier "$identifier")
+    if [[ -z "$account_id" ]]; then
+        echo "Error: No account found matching: $identifier"
         exit 1
     fi
-    
+
     local email
-    email=$(echo "$account_info" | jq -r '.email')
-    
+    email=$(get_account_email "$account_id")
+
     local active_account
-    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    
-    if [[ "$active_account" == "$account_num" ]]; then
-        echo "Warning: Account-$account_num ($email) is currently active"
+    active_account=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+
+    if [[ "$active_account" == "$account_id" ]]; then
+        echo "Warning: Account ${account_id} (${email}) is currently active"
     fi
-    
-    echo -n "Are you sure you want to permanently remove Account-$account_num ($email)? [y/N] "
+
+    echo -n "Are you sure you want to permanently remove ${account_id} (${email})? [y/N] "
     read -r confirm
-    
+
     if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
         echo "Cancelled"
         exit 0
     fi
-    
-    # Remove backup credentials via backend
-    delete_account_credentials "$account_num" "$email"
 
-    # Legacy cleanup (in case of backend migration)
-    local platform
-    platform=$(detect_platform)
-    case "$platform" in
-        macos)
-            security delete-generic-password -s "Claude Code-Account-${account_num}-${email}" 2>/dev/null || true
-            ;;
-        linux|wsl)
-            rm -f "$BACKUP_DIR/credentials/.claude-credentials-${account_num}-${email}.json"
-            ;;
-    esac
-    rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
-    
+    # Remove backup credentials via backend
+    delete_account_credentials "$account_id" "$email"
+    rm -f "$BACKUP_DIR/configs/.claude-config-${account_id}-${email}.json"
+
     # Update sequence.json
     local updated_sequence
-    updated_sequence=$(jq --arg num "$account_num" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        del(.accounts[$num]) |
-        .sequence = (.sequence | map(select(. != ($num | tonumber)))) |
+    updated_sequence=$(jq --arg id "$account_id" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        del(.accounts[$id]) |
+        .sequence = (.sequence | map(select(. != $id))) |
         .lastUpdated = $now
     ' "$SEQUENCE_FILE")
-    
+
     write_json "$SEQUENCE_FILE" "$updated_sequence"
-    
-    echo "Account-$account_num ($email) has been removed"
+
+    echo "Removed ${account_id} (${email})"
 }
 
 # First-run setup workflow
@@ -892,32 +1043,29 @@ cmd_list() {
         current_org="Personal"
     fi
 
-    # Find which account number corresponds to the current email
-    local active_account_num=""
+    # Find which account ID corresponds to the current email
+    local active_account_id=""
     if [[ "$current_email" != "none" ]]; then
-        active_account_num=$(jq -r --arg email "$current_email" '.accounts | to_entries[] | select(.value.email == $email) | .key' "$SEQUENCE_FILE" 2>/dev/null)
+        active_account_id=$(hash_email "$current_email")
     fi
 
     echo "Accounts:"
 
-    # Iterate through accounts and display with org names
-    local sequence_nums
-    sequence_nums=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
+    local sequence_ids
+    sequence_ids=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
 
-    while IFS= read -r num; do
+    while IFS= read -r id; do
         local email org_name
-        email=$(jq -r --arg num "$num" '.accounts[$num].email' "$SEQUENCE_FILE")
+        email=$(jq -r --arg id "$id" '.accounts[$id].email' "$SEQUENCE_FILE")
 
-        if [[ "$num" == "$active_account_num" ]]; then
-            # For active account, get org from current config
+        if [[ "$id" == "$active_account_id" ]]; then
             org_name="$current_org"
-            echo "  $num: $email [$org_name] (active)"
+            echo "  ${id}  ${email}  [${org_name}] (active)"
         else
-            # For other accounts, get org from backup
-            org_name=$(get_account_org_name "$num" "$email")
-            echo "  $num: $email [$org_name]"
+            org_name=$(get_account_org_name "$id" "$email")
+            echo "  ${id}  ${email}  [${org_name}]"
         fi
-    done <<< "$sequence_nums"
+    done <<< "$sequence_ids"
 }
 
 # Switch to next account
@@ -939,19 +1087,17 @@ cmd_switch() {
     if ! account_exists "$current_email"; then
         echo "Notice: Active account '$current_email' was not managed."
         cmd_add_account
-        local account_num
-        account_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-        echo "It has been automatically added as Account-$account_num."
-        echo "Please run './ccswitch.sh --switch' again to switch to the next account."
+        local account_id
+        account_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+        echo "It has been automatically added as ${account_id}."
+        echo "Please run 'ccswitch --switch' again to switch to the next account."
         exit 0
     fi
-    
-    # wait_for_claude_close
-    
+
     local active_account sequence
-    active_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    active_account=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
     sequence=($(jq -r '.sequence[]' "$SEQUENCE_FILE"))
-    
+
     # Find next account in sequence
     local next_account current_index=0
     for i in "${!sequence[@]}"; do
@@ -960,90 +1106,69 @@ cmd_switch() {
             break
         fi
     done
-    
+
     next_account="${sequence[$(((current_index + 1) % ${#sequence[@]}))]}"
-    
+
     perform_switch "$next_account"
 }
 
-# Switch to specific account
+# Switch to specific account (accepts hash, email, or numeric index)
 cmd_switch_to() {
     if [[ $# -eq 0 ]]; then
-        echo "Usage: $0 --switch-to <account_number|email>"
+        echo "Usage: $0 --switch-to <hash|email|index>"
         exit 1
     fi
-    
+
     local identifier="$1"
-    local target_account
-    
+
     if [[ ! -f "$SEQUENCE_FILE" ]]; then
         echo "Error: No accounts are managed yet"
         exit 1
     fi
-    
-    # Handle email vs numeric identifier
-    if [[ "$identifier" =~ ^[0-9]+$ ]]; then
-        target_account="$identifier"
-    else
-        # Validate email format
-        if ! validate_email "$identifier"; then
-            echo "Error: Invalid email format: $identifier"
-            exit 1
-        fi
-        
-        # Resolve email to account number
-        target_account=$(resolve_account_identifier "$identifier")
-        if [[ -z "$target_account" ]]; then
-            echo "Error: No account found with email: $identifier"
-            exit 1
-        fi
-    fi
-    
-    local account_info
-    account_info=$(jq -r --arg num "$target_account" '.accounts[$num] // empty' "$SEQUENCE_FILE")
-    
-    if [[ -z "$account_info" ]]; then
-        echo "Error: Account-$target_account does not exist"
+
+    local target_account
+    target_account=$(resolve_account_identifier "$identifier")
+
+    if [[ -z "$target_account" ]]; then
+        echo "Error: No account found matching: $identifier"
         exit 1
     fi
-    
-    # wait_for_claude_close
+
     perform_switch "$target_account"
 }
 
-# Perform the actual account switch
+# Perform the actual account switch (target is an account hash ID)
 perform_switch() {
-    local target_account="$1"
-    
-    # Get current and target account info
-    local current_account target_email current_email
-    current_account=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    target_email=$(jq -r --arg num "$target_account" '.accounts[$num].email' "$SEQUENCE_FILE")
+    local target_id="$1"
+
+    local current_id target_email current_email
+    current_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+    target_email=$(get_account_email "$target_id")
     current_email=$(get_current_account)
-    
+
     # Step 1: Backup current account
     local current_creds current_config
     current_creds=$(read_credentials)
     current_config=$(cat "$(get_claude_config_path)")
-    
-    write_account_credentials "$current_account" "$current_email" "$current_creds"
-    write_account_config "$current_account" "$current_email" "$current_config"
-    
-    # Step 2: Retrieve target account (auto-refresh if expired)
+
+    write_account_credentials "$current_id" "$current_email" "$current_creds"
+    write_account_config "$current_id" "$current_email" "$current_config"
+
+    # Step 2: Retrieve target account
     local target_creds target_config
-    target_creds=$(read_account_credentials "$target_account" "$target_email")
-    target_config=$(read_account_config "$target_account" "$target_email")
+    target_creds=$(read_account_credentials "$target_id" "$target_email")
+    target_config=$(read_account_config "$target_id" "$target_email")
 
     if [[ -z "$target_creds" || -z "$target_config" ]]; then
-        echo "Error: Missing backup data for Account-$target_account"
+        echo "Error: Missing backup data for ${target_id} (${target_email})"
         exit 1
     fi
 
     # Auto-refresh expired target token before switching
     if _token_is_expired "$target_creds"; then
-        echo "Token expired for Account-$target_account, refreshing..."
-        if refresh_account_token "$target_account"; then
-            target_creds=$(read_account_credentials "$target_account" "$target_email")
+        echo "Token expired for ${target_id}, refreshing..."
+        if refresh_account_token "$target_id"; then
+            target_creds=$(read_account_credentials "$target_id" "$target_email")
             echo "Token refreshed ✓"
         else
             echo "Warning: Token refresh failed. Switch may require re-authentication."
@@ -1052,7 +1177,7 @@ perform_switch() {
 
     # Step 3: Activate target account
     write_credentials "$target_creds"
-    
+
     # Extract oauthAccount from backup and validate
     local oauth_section
     oauth_section=$(echo "$target_config" | jq '.oauthAccount' 2>/dev/null)
@@ -1060,32 +1185,30 @@ perform_switch() {
         echo "Error: Invalid oauthAccount in backup"
         exit 1
     fi
-    
-    # Merge with current config and validate
+
     local merged_config
     merged_config=$(jq --argjson oauth "$oauth_section" '.oauthAccount = $oauth' "$(get_claude_config_path)" 2>/dev/null)
     if [[ $? -ne 0 ]]; then
         echo "Error: Failed to merge config"
         exit 1
     fi
-    
-    # Use existing safe write_json function
+
     write_json "$(get_claude_config_path)" "$merged_config"
-    
+
     # Step 4: Update state (track activation times per account for usage attribution)
     local updated_sequence
-    updated_sequence=$(jq --arg num "$target_account" --arg prev "$current_account" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
-        .activeAccountNumber = ($num | tonumber) |
+    updated_sequence=$(jq --arg id "$target_id" --arg prev "$current_id" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+        .activeAccountId = $id |
         .lastUpdated = $now |
-        .accounts[$num].activeSince = $now |
-        .accounts[$prev].lastDeactivated = $now |
-        .switchLog = ((.switchLog // []) + [{"from": ($prev | tonumber), "to": ($num | tonumber), "at": $now}]) |
+        .accounts[$id].activeSince = $now |
+        (if $prev != "null" and $prev != "" then .accounts[$prev].lastDeactivated = $now else . end) |
+        .switchLog = ((.switchLog // []) + [{"from": $prev, "to": $id, "at": $now}]) |
         .switchLog = (.switchLog | if length > 100 then .[-100:] else . end)
     ' "$SEQUENCE_FILE")
-    
+
     write_json "$SEQUENCE_FILE" "$updated_sequence"
-    
-    echo "Switched to Account-$target_account ($target_email)"
+
+    echo "Switched to ${target_id} (${target_email})"
     # Display updated account list
     cmd_list
     echo ""
@@ -1279,7 +1402,7 @@ cmd_usage() {
 import json, sys
 try:
     seq = json.load(open('$SEQUENCE_FILE'))
-    active = str(seq.get('activeAccountNumber', 1))
+    active = str(seq.get('activeAccountId', 1))
     acct = seq.get('accounts', {}).get(active, {})
     print(acct.get('weeklyTokenLimit', 0))
 except: print(0)
@@ -1435,7 +1558,7 @@ print(int(float(s)))
     active_num=$(python3 -c "
 import json
 seq = json.load(open('$SEQUENCE_FILE'))
-print(seq.get('activeAccountNumber', 1))
+print(seq.get('activeAccountId', 1))
 " 2>/dev/null)
 
     python3 -c "
@@ -1460,9 +1583,9 @@ cmd_usage_all() {
     fi
 
     local account_nums
-    account_nums=$(jq -r '.accounts | keys[]' "$SEQUENCE_FILE" | sort -n)
+    account_nums=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
     local active_num
-    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+    active_num=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
     local platform
     platform=$(detect_platform)
 
@@ -1556,7 +1679,7 @@ for line in results:
     if len(parts) < 8: continue
     num, email, h5_str, d7_str, h5_reset, d7_reset, sub_type, status = parts
     acct = {
-        'account': int(num),
+        'id': num,
         'email': email,
         'active': num == active_num,
         'subscription': sub_type or None,
@@ -1733,45 +1856,40 @@ except: pass
         return 0
     fi
 
-    # ── Mode 2: managed account by number/email ──
+    # ── Mode 2: managed account by hash/email/index ──
     if [[ -z "$target" ]]; then
-        echo "echo 'Usage: eval \"\$(ccswitch --env <account_number|email>)\"'" >&2
+        echo "echo 'Usage: eval \"\$(ccswitch --env <hash|email|index>)\"'" >&2
         echo "echo '        eval \"\$(ccswitch --env --creds-file /path/to/creds.json)\"'" >&2
         echo "echo '        eval \"\$(ccswitch --env --creds-file /path --config-dir /dir)\"'" >&2
         echo "echo 'Unset:  eval \"\$(ccswitch --env --unset)\"'" >&2
         return 1
     fi
 
-    # Resolve account number
-    local account_num="" account_email=""
-    if [[ "$target" =~ ^[0-9]+$ ]]; then
-        account_num="$target"
-        account_email=$(jq -r ".accounts[\"$account_num\"].email // empty" "$SEQUENCE_FILE")
-    else
-        account_num=$(jq -r ".accounts | to_entries[] | select(.value.email == \"$target\") | .key" "$SEQUENCE_FILE")
-        account_email="$target"
-    fi
-
-    if [[ -z "$account_num" ]] || [[ -z "$account_email" ]]; then
+    # Resolve to account hash ID
+    local account_id
+    account_id=$(resolve_account_identifier "$target")
+    if [[ -z "$account_id" ]]; then
         echo "echo 'Error: Account not found: $target'" >&2
         return 1
     fi
+    local account_email
+    account_email=$(get_account_email "$account_id")
 
-    local config_dir="${custom_config_dir:-$HOME/.claude-env-${account_num}}"
+    local config_dir="${custom_config_dir:-$HOME/.claude-env-${account_id}}"
     local shared_dir="$HOME/.claude"
 
     # Get OAuth credentials for this account via backend
     local cred_json=""
-    local active_num
-    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
-    if [[ "$account_num" == "$active_num" ]]; then
+    local active_id
+    active_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+    if [[ "$account_id" == "$active_id" ]]; then
         cred_json=$(read_credentials)
     else
-        cred_json=$(read_account_credentials "$account_num" "$account_email")
+        cred_json=$(read_account_credentials "$account_id" "$account_email")
     fi
 
     if [[ -z "$cred_json" ]]; then
-        echo "echo 'Error: No credentials found for account #${account_num} (${account_email})'" >&2
+        echo "echo 'Error: No credentials found for ${account_id} (${account_email})'" >&2
         return 1
     fi
 
@@ -1789,7 +1907,7 @@ except: pass
     chmod 600 "$config_dir/.credentials.json"
 
     # Write identity from config backup
-    local config_backup="$BACKUP_DIR/configs/.claude-config-${account_num}-${account_email}.json"
+    local config_backup="$BACKUP_DIR/configs/.claude-config-${account_id}-${account_email}.json"
     if [[ -f "$config_backup" ]]; then
         python3 -c "
 import json
@@ -1801,7 +1919,7 @@ json.dump(out, open('$config_dir/.claude.json', 'w'), indent=2)
     fi
 
     echo "export CLAUDE_CONFIG_DIR=\"$config_dir\""
-    echo "echo '[ccswitch] Shell bound to #${account_num} ${account_email} (CLAUDE_CONFIG_DIR=$config_dir)'" >&2
+    echo "echo '[ccswitch] Shell bound to ${account_id} ${account_email} (CLAUDE_CONFIG_DIR=$config_dir)'" >&2
 }
 
 # Show help
@@ -1868,7 +1986,12 @@ main() {
     
     check_bash_version
     check_dependencies
-    
+
+    # Run migration on any command that needs state (skips if v2 or no file)
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        migrate_v1_to_v2
+    fi
+
     case "${1:-}" in
         --add-account)
             cmd_add_account
