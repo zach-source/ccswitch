@@ -412,6 +412,166 @@ delete_account_credentials() {
     esac
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# OAuth Token Refresh
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Claude Code OAuth client ID (public, used by all Claude Code installations)
+readonly OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+readonly OAUTH_TOKEN_URL="https://console.anthropic.com/v1/oauth/token"
+
+# Check if a credential JSON blob has an expired access token
+_token_is_expired() {
+    local cred_json="$1"
+    python3 -c "
+import sys, json, time
+d = json.loads('''$cred_json''')
+expires = d.get('claudeAiOauth', {}).get('expiresAt', 0)
+# expiresAt is milliseconds since epoch
+now_ms = int(time.time() * 1000)
+# Consider expired if less than 5 minutes remaining
+sys.exit(0 if expires < (now_ms + 300000) else 1)
+" 2>/dev/null
+}
+
+# Refresh an OAuth token using the refresh token. Returns updated cred JSON or empty on failure.
+_refresh_token() {
+    local cred_json="$1"
+    local refresh_token
+    refresh_token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('refreshToken',''))" 2>/dev/null)
+
+    if [[ -z "$refresh_token" ]]; then
+        return 1
+    fi
+
+    local response
+    response=$(curl -s --max-time 15 -X POST "$OAUTH_TOKEN_URL" \
+        -H "Content-Type: application/json" \
+        -d "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"$refresh_token\",\"client_id\":\"$OAUTH_CLIENT_ID\"}" 2>/dev/null)
+
+    if [[ -z "$response" ]]; then
+        return 1
+    fi
+
+    # Check for errors
+    local has_error
+    has_error=$(echo "$response" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('yes' if 'error' in d else 'no')" 2>/dev/null)
+    if [[ "$has_error" == "yes" ]]; then
+        local err_msg
+        err_msg=$(echo "$response" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); e=d.get('error',{}); print(e.get('message','unknown') if isinstance(e,dict) else str(e))" 2>/dev/null)
+        echo "$err_msg" >&2
+        return 1
+    fi
+
+    # Merge new tokens into existing credential blob
+    echo "$response" | python3 -c "
+import sys, json, time
+resp = json.loads(sys.stdin.read())
+cred = json.loads('''$cred_json''')
+oauth = cred.get('claudeAiOauth', {})
+oauth['accessToken'] = resp['access_token']
+if 'refresh_token' in resp:
+    oauth['refreshToken'] = resp['refresh_token']
+expires_in = resp.get('expires_in', 3600)
+oauth['expiresAt'] = int(time.time() * 1000) + expires_in * 1000
+cred['claudeAiOauth'] = oauth
+print(json.dumps(cred))
+" 2>/dev/null
+}
+
+# Refresh credentials for a specific account (by number). Updates the backend.
+# Returns 0 on success, 1 on failure.
+refresh_account_token() {
+    local account_num="$1"
+    local email
+    email=$(jq -r ".accounts[\"$account_num\"].email // empty" "$SEQUENCE_FILE")
+    local active_num
+    active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+
+    # Read current credentials
+    local cred_json
+    if [[ "$account_num" == "$active_num" ]]; then
+        cred_json=$(read_credentials)
+    else
+        cred_json=$(read_account_credentials "$account_num" "$email")
+    fi
+
+    if [[ -z "$cred_json" ]]; then
+        return 1
+    fi
+
+    # Check if actually expired
+    if ! _token_is_expired "$cred_json"; then
+        return 0  # Not expired, nothing to do
+    fi
+
+    # Attempt refresh
+    local new_creds
+    new_creds=$(_refresh_token "$cred_json")
+    if [[ -z "$new_creds" ]]; then
+        return 1
+    fi
+
+    # Write back to backend
+    if [[ "$account_num" == "$active_num" ]]; then
+        write_credentials "$new_creds"
+    else
+        write_account_credentials "$account_num" "$email" "$new_creds"
+    fi
+    return 0
+}
+
+# Refresh all accounts with expired tokens
+cmd_refresh_all() {
+    local account_nums
+    account_nums=$(jq -r '.accounts | keys[]' "$SEQUENCE_FILE" | sort -n)
+
+    echo "Refreshing expired tokens..."
+    echo ""
+
+    for num in $account_nums; do
+        local email
+        email=$(jq -r ".accounts[\"$num\"].email" "$SEQUENCE_FILE")
+        echo -n "  #${num} ${email}: "
+
+        local active_num
+        active_num=$(jq -r '.activeAccountNumber' "$SEQUENCE_FILE")
+        local cred_json
+        if [[ "$num" == "$active_num" ]]; then
+            cred_json=$(read_credentials)
+        else
+            cred_json=$(read_account_credentials "$num" "$email")
+        fi
+
+        if [[ -z "$cred_json" ]]; then
+            echo "no credentials"
+            continue
+        fi
+
+        if ! _token_is_expired "$cred_json"; then
+            local hours_left
+            hours_left=$(echo "$cred_json" | python3 -c "
+import sys, json, time
+d = json.loads(sys.stdin.read())
+exp = d.get('claudeAiOauth', {}).get('expiresAt', 0)
+left = (exp - time.time() * 1000) / 3600000
+print(f'{left:.1f}')
+" 2>/dev/null)
+            echo "valid (${hours_left}h remaining)"
+            continue
+        fi
+
+        if refresh_account_token "$num"; then
+            echo "refreshed ✓"
+        else
+            echo "failed ✗ (switch to this account and run claude to re-auth)"
+        fi
+
+        # Small delay between refreshes to avoid rate limits
+        sleep 2
+    done
+}
+
 # Read account config from backup
 read_account_config() {
     local account_num="$1"
@@ -812,16 +972,27 @@ perform_switch() {
     write_account_credentials "$current_account" "$current_email" "$current_creds"
     write_account_config "$current_account" "$current_email" "$current_config"
     
-    # Step 2: Retrieve target account
+    # Step 2: Retrieve target account (auto-refresh if expired)
     local target_creds target_config
     target_creds=$(read_account_credentials "$target_account" "$target_email")
     target_config=$(read_account_config "$target_account" "$target_email")
-    
+
     if [[ -z "$target_creds" || -z "$target_config" ]]; then
         echo "Error: Missing backup data for Account-$target_account"
         exit 1
     fi
-    
+
+    # Auto-refresh expired target token before switching
+    if _token_is_expired "$target_creds"; then
+        echo "Token expired for Account-$target_account, refreshing..."
+        if refresh_account_token "$target_account"; then
+            target_creds=$(read_account_credentials "$target_account" "$target_email")
+            echo "Token refreshed ✓"
+        else
+            echo "Warning: Token refresh failed. Switch may require re-authentication."
+        fi
+    fi
+
     # Step 3: Activate target account
     write_credentials "$target_creds"
     
@@ -1253,7 +1424,7 @@ cmd_usage_all() {
             echo -ne "  \033[0;90mQuerying #${num} ${email}...\033[0m "
         fi
 
-        # Get OAuth token via credential backend
+        # Get OAuth token via credential backend (auto-refresh if expired)
         token=""
         sub_type=""
         local cred_json
@@ -1261,6 +1432,17 @@ cmd_usage_all() {
             cred_json=$(read_credentials)
         else
             cred_json=$(read_account_credentials "$num" "$email")
+        fi
+        # Auto-refresh expired tokens before querying
+        if [[ -n "$cred_json" ]] && _token_is_expired "$cred_json"; then
+            if refresh_account_token "$num" 2>/dev/null; then
+                # Re-read after refresh
+                if [[ "$num" == "$active_num" ]]; then
+                    cred_json=$(read_credentials)
+                else
+                    cred_json=$(read_account_credentials "$num" "$email")
+                fi
+            fi
         fi
         if [[ -n "$cred_json" ]]; then
             token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
@@ -1581,6 +1763,7 @@ show_usage() {
     echo "  --env --creds-file <path>       Use a credentials file (mountable secret)"
     echo "  --env --creds-file <p> --config-dir <d>  Custom config dir + creds file"
     echo "  --env --unset                   Revert shell to global account"
+    echo "  --refresh-all                   Refresh expired OAuth tokens for all accounts"
     echo ""
     echo "Usage Monitoring:"
     echo "  --usage                          Show 5h block and weekly usage limits"
@@ -1672,6 +1855,9 @@ main() {
         --env)
             shift
             cmd_env "$@"
+            ;;
+        --refresh-all)
+            cmd_refresh_all
             ;;
         --backend)
             local b
