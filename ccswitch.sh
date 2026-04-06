@@ -1416,30 +1416,99 @@ for line in results:
 
 # Output eval-able exports to use a specific account in this shell only
 # Sets CLAUDE_CONFIG_DIR to an isolated per-account directory with symlinks to shared config
+#
+# Usage:
+#   eval "$(ccswitch --env 2)"                          # Use account 2 from managed accounts
+#   eval "$(ccswitch --env --unset)"                    # Revert to global
+#   eval "$(ccswitch --env --creds-file /path/to/creds.json)"                  # Use a credentials file
+#   eval "$(ccswitch --env --creds-file /mnt/secrets/creds.json --config-dir /tmp/claude-ci)"  # Custom config dir
 cmd_env() {
-    local target="${1:-}"
-    if [[ -z "$target" ]]; then
-        echo "echo 'Usage: eval \"\$(ccswitch --env <account_number|email>)\"'" >&2
-        echo "echo 'Unset: eval \"\$(ccswitch --env --unset)\"'" >&2
-        return 1
-    fi
+    local target="" creds_file="" custom_config_dir=""
 
-    # Handle --unset
-    if [[ "$target" == "--unset" ]]; then
-        echo "unset CLAUDE_CONFIG_DIR"
-        echo "echo '[ccswitch] Reverted to global account'" >&2
+    # Parse args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --unset)
+                echo "unset CLAUDE_CONFIG_DIR"
+                echo "echo '[ccswitch] Reverted to global account'" >&2
+                return 0
+                ;;
+            --creds-file)
+                shift
+                creds_file="${1:-}"
+                ;;
+            --config-dir)
+                shift
+                custom_config_dir="${1:-}"
+                ;;
+            *)
+                target="$1"
+                ;;
+        esac
+        shift
+    done
+
+    # ── Mode 1: credentials file (no managed account needed) ──
+    if [[ -n "$creds_file" ]]; then
+        if [[ ! -f "$creds_file" ]]; then
+            echo "echo 'Error: Credentials file not found: $creds_file'" >&2
+            return 1
+        fi
+
+        local config_dir="${custom_config_dir:-$HOME/.claude-env-file}"
+        local shared_dir="$HOME/.claude"
+
+        mkdir -p "$config_dir"
+
+        # Symlink shared resources
+        for item in settings.json CLAUDE.md mcp_servers.json hooks skills agents plugins commands scripts; do
+            if [[ -e "$shared_dir/$item" ]] && [[ ! -e "$config_dir/$item" ]]; then
+                ln -sf "$shared_dir/$item" "$config_dir/$item"
+            fi
+        done
+        mkdir -p "$config_dir/projects"
+
+        # Symlink or copy the credentials file
+        if [[ "$creds_file" == /* ]]; then
+            # Absolute path - symlink to it (supports mounted secrets)
+            ln -sf "$creds_file" "$config_dir/.credentials.json"
+        else
+            # Relative path - resolve and symlink
+            ln -sf "$(cd "$(dirname "$creds_file")" && pwd)/$(basename "$creds_file")" "$config_dir/.credentials.json"
+        fi
+
+        # Try to extract identity from the creds file
+        python3 -c "
+import json, sys
+try:
+    d = json.load(open('$creds_file'))
+    oauth = d.get('claudeAiOauth', {})
+    # If we can't get identity from creds, that's ok - Claude will figure it out
+    out = {'hasCompletedOnboarding': True}
+    json.dump(out, open('$config_dir/.claude.json', 'w'), indent=2)
+except: pass
+" 2>/dev/null
+
+        echo "export CLAUDE_CONFIG_DIR=\"$config_dir\""
+        echo "echo '[ccswitch] Shell bound to credentials file: $creds_file (CLAUDE_CONFIG_DIR=$config_dir)'" >&2
         return 0
     fi
 
-    # Resolve account number
-    local account_num=""
-    local account_email=""
+    # ── Mode 2: managed account by number/email ──
+    if [[ -z "$target" ]]; then
+        echo "echo 'Usage: eval \"\$(ccswitch --env <account_number|email>)\"'" >&2
+        echo "echo '        eval \"\$(ccswitch --env --creds-file /path/to/creds.json)\"'" >&2
+        echo "echo '        eval \"\$(ccswitch --env --creds-file /path --config-dir /dir)\"'" >&2
+        echo "echo 'Unset:  eval \"\$(ccswitch --env --unset)\"'" >&2
+        return 1
+    fi
 
+    # Resolve account number
+    local account_num="" account_email=""
     if [[ "$target" =~ ^[0-9]+$ ]]; then
         account_num="$target"
         account_email=$(jq -r ".accounts[\"$account_num\"].email // empty" "$SEQUENCE_FILE")
     else
-        # Search by email
         account_num=$(jq -r ".accounts | to_entries[] | select(.value.email == \"$target\") | .key" "$SEQUENCE_FILE")
         account_email="$target"
     fi
@@ -1449,10 +1518,8 @@ cmd_env() {
         return 1
     fi
 
-    local config_dir="$HOME/.claude-env-${account_num}"
+    local config_dir="${custom_config_dir:-$HOME/.claude-env-${account_num}}"
     local shared_dir="$HOME/.claude"
-    local platform
-    platform=$(detect_platform)
 
     # Get OAuth credentials for this account via backend
     local cred_json=""
@@ -1471,39 +1538,29 @@ cmd_env() {
 
     # Create isolated config dir with symlinks to shared config
     mkdir -p "$config_dir"
-
-    # Symlink shared resources (read-only is fine)
     for item in settings.json CLAUDE.md mcp_servers.json hooks skills agents plugins commands scripts; do
         if [[ -e "$shared_dir/$item" ]] && [[ ! -e "$config_dir/$item" ]]; then
             ln -sf "$shared_dir/$item" "$config_dir/$item"
         fi
     done
-
-    # Create projects dir (must be writable, separate per account)
     mkdir -p "$config_dir/projects"
 
-    # Write credentials file for this account (CLAUDE_CONFIG_DIR uses file-based creds)
+    # Write credentials file
     echo "$cred_json" > "$config_dir/.credentials.json"
     chmod 600 "$config_dir/.credentials.json"
 
-    # Write the oauthAccount identity so Claude knows which account this is
-    local oauth_account
-    oauth_account=$(jq -r ".accounts[\"$account_num\"]" "$SEQUENCE_FILE")
-    # Get the full config backup if available
+    # Write identity from config backup
     local config_backup="$BACKUP_DIR/configs/.claude-config-${account_num}-${account_email}.json"
     if [[ -f "$config_backup" ]]; then
-        # Extract oauthAccount from backup and write a minimal .claude.json
         python3 -c "
 import json
 backup = json.load(open('$config_backup'))
 oauth = backup.get('oauthAccount', {})
-# Minimal .claude.json with just the account identity
 out = {'oauthAccount': oauth, 'hasCompletedOnboarding': True}
 json.dump(out, open('$config_dir/.claude.json', 'w'), indent=2)
 " 2>/dev/null
     fi
 
-    # Output the export statement
     echo "export CLAUDE_CONFIG_DIR=\"$config_dir\""
     echo "echo '[ccswitch] Shell bound to #${account_num} ${account_email} (CLAUDE_CONFIG_DIR=$config_dir)'" >&2
 }
@@ -1521,6 +1578,8 @@ show_usage() {
     echo "  --switch                         Rotate to next account in sequence"
     echo "  --switch-to <num|email>          Switch to specific account number or email"
     echo "  --env <num|email>               Output exports for per-shell account (use with eval)"
+    echo "  --env --creds-file <path>       Use a credentials file (mountable secret)"
+    echo "  --env --creds-file <p> --config-dir <d>  Custom config dir + creds file"
     echo "  --env --unset                   Revert shell to global account"
     echo ""
     echo "Usage Monitoring:"
@@ -1553,6 +1612,8 @@ show_usage() {
     echo "  $0 --use-zai                     # Use z.ai API with 1Password auth"
     echo "  $0 --use-anthropic               # Revert to default API"
     echo "  eval \"\$($0 --env 2)\"             # Bind this shell to account 2"
+    echo "  eval \"\$($0 --env --creds-file /mnt/secrets/claude.json)\"  # Mount a secret"
+    echo "  eval \"\$($0 --env --creds-file /s/creds.json --config-dir /tmp/ci)\"  # CI/container"
     echo "  eval \"\$($0 --env --unset)\"       # Revert to global account"
 }
 
