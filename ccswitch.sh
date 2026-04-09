@@ -743,55 +743,62 @@ cmd_login() {
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo ""
 
-        # Create isolated config dir
-        local login_dir
-        login_dir=$(mktemp -d -t ccswitch-login.XXXXXX)
+        # Use the real switch mechanism: swap this account into the active slot,
+        # then launch claude which will handle login/refresh via its native auth.
+        # After claude exits, save the (now fresh) credentials back to the backup.
 
-        # Write the expected identity so Claude Code knows what account to log into
-        python3 -c "
-import json
-out = {'oauthAccount': {'emailAddress': '${email}'}, 'hasCompletedOnboarding': True}
-json.dump(out, open('${login_dir}/.claude.json', 'w'), indent=2)
-" 2>/dev/null
+        local original_active
+        original_active=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
 
+        # Switch to this account (puts its backup creds into the active keychain slot)
+        echo "Switching to ${id} (${email})..."
+        perform_switch "$id" >/dev/null 2>&1 || true
+
+        echo ""
         echo "Launching claude for interactive login as ${email}..."
         echo "  - You will be prompted to log in via your browser"
         echo "  - Make sure to log in as: ${email}"
         echo "  - Type /exit or press Ctrl+D when done"
         echo ""
 
-        # Launch claude in interactive mode with the isolated config dir
-        # Use /login command to trigger the auth flow explicitly
-        CLAUDE_CONFIG_DIR="$login_dir" claude /login || true
+        # Launch claude interactively - it will detect expired token and prompt for login
+        claude || true
 
-        # After claude exits, check if we got fresh credentials
-        if [[ -f "$login_dir/.credentials.json" ]]; then
-            local new_creds
-            new_creds=$(cat "$login_dir/.credentials.json")
-            if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
-                # Verify the logged-in email matches (warn if not)
-                local actual_email
-                actual_email=$(jq -r '.oauthAccount.emailAddress // empty' "$login_dir/.claude.json" 2>/dev/null)
-                if [[ -n "$actual_email" ]] && [[ "$actual_email" != "$email" ]]; then
-                    echo ""
-                    echo "⚠ Warning: Logged in as ${actual_email}, expected ${email}"
-                    echo "  The credentials will be saved under the expected slot."
-                fi
-
-                write_account_credentials "$id" "$email" "$new_creds"
+        # After claude exits, capture the fresh credentials from the active keychain slot
+        local new_creds
+        new_creds=$(read_credentials)
+        if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
+            # Verify the logged-in email matches
+            local actual_email
+            actual_email=$(get_current_account)
+            if [[ "$actual_email" != "$email" ]] && [[ "$actual_email" != "none" ]]; then
                 echo ""
-                echo "✓ Credentials saved for ${id} (${email})"
-            else
-                echo ""
-                echo "✗ No fresh credentials captured for ${id}"
+                echo "⚠ Warning: Logged in as ${actual_email}, expected ${email}"
             fi
+
+            # Save fresh credentials to the backup slot
+            write_account_credentials "$id" "$email" "$new_creds"
+            local config_content
+            config_content=$(cat "$(get_claude_config_path)")
+            write_account_config "$id" "$email" "$config_content"
+            echo ""
+            echo "✓ Credentials saved for ${id} (${email})"
         else
             echo ""
-            echo "✗ Login appears to have been cancelled for ${id}"
+            echo "✗ No fresh credentials captured for ${id}"
         fi
-
-        rm -rf "$login_dir"
     done
+
+    # Restore the originally active account
+    if [[ -n "$original_active" ]] && [[ "$original_active" != "null" ]]; then
+        local current_active
+        current_active=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+        if [[ "$current_active" != "$original_active" ]]; then
+            echo ""
+            echo "Restoring original account $(get_account_email "$original_active")..."
+            perform_switch "$original_active" >/dev/null 2>&1 || true
+        fi
+    fi
 
     echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
