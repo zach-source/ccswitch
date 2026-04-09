@@ -675,6 +675,129 @@ print(f'{h:.1f}')
     echo "Saved credentials for ${target_id} (${target_email}, expires in ${expires_h}h)"
 }
 
+# Interactive re-login for accounts with expired/invalid credentials.
+# For each expired account, launches `claude` in interactive mode so the user
+# can log in via the browser. After claude exits, captures the fresh
+# credentials and writes them to the backup slot. Rotates through all
+# expired accounts (or a specific one if --only <id> is passed).
+cmd_login() {
+    if ! command -v claude &>/dev/null; then
+        echo "Error: claude CLI not found"
+        return 1
+    fi
+
+    local only_id=""
+    local force="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --only)
+                shift
+                only_id=$(resolve_account_identifier "${1:-}")
+                [[ -z "$only_id" ]] && { echo "Error: account not found: $1"; return 1; }
+                ;;
+            --force)
+                force="true"  # Re-login even if not expired
+                ;;
+        esac
+        shift
+    done
+
+    local account_ids
+    account_ids=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
+
+    # Build list of accounts needing login
+    local -a todo=()
+    for id in $account_ids; do
+        [[ -n "$only_id" ]] && [[ "$id" != "$only_id" ]] && continue
+
+        local email
+        email=$(get_account_email "$id")
+        local cred_json
+        cred_json=$(read_account_credentials "$id" "$email")
+
+        if [[ "$force" == "true" ]] || [[ -z "$cred_json" ]] || _token_is_expired "$cred_json"; then
+            todo+=("${id}|${email}")
+        fi
+    done
+
+    if [[ ${#todo[@]} -eq 0 ]]; then
+        echo "All accounts have valid credentials. Use --force to re-login anyway."
+        return 0
+    fi
+
+    echo "Found ${#todo[@]} account(s) needing login:"
+    for entry in "${todo[@]}"; do
+        echo "  ${entry%|*} ${entry#*|}"
+    done
+    echo ""
+
+    local i=0
+    for entry in "${todo[@]}"; do
+        i=$((i + 1))
+        local id="${entry%|*}"
+        local email="${entry#*|}"
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "[${i}/${#todo[@]}] Logging in: ${id} (${email})"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
+
+        # Create isolated config dir
+        local login_dir
+        login_dir=$(mktemp -d -t ccswitch-login.XXXXXX)
+
+        # Write the expected identity so Claude Code knows what account to log into
+        python3 -c "
+import json
+out = {'oauthAccount': {'emailAddress': '${email}'}, 'hasCompletedOnboarding': True}
+json.dump(out, open('${login_dir}/.claude.json', 'w'), indent=2)
+" 2>/dev/null
+
+        echo "Launching claude for interactive login as ${email}..."
+        echo "  - You will be prompted to log in via your browser"
+        echo "  - Make sure to log in as: ${email}"
+        echo "  - Type /exit or press Ctrl+D when done"
+        echo ""
+
+        # Launch claude in interactive mode with the isolated config dir
+        # Use /login command to trigger the auth flow explicitly
+        CLAUDE_CONFIG_DIR="$login_dir" claude /login || true
+
+        # After claude exits, check if we got fresh credentials
+        if [[ -f "$login_dir/.credentials.json" ]]; then
+            local new_creds
+            new_creds=$(cat "$login_dir/.credentials.json")
+            if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
+                # Verify the logged-in email matches (warn if not)
+                local actual_email
+                actual_email=$(jq -r '.oauthAccount.emailAddress // empty' "$login_dir/.claude.json" 2>/dev/null)
+                if [[ -n "$actual_email" ]] && [[ "$actual_email" != "$email" ]]; then
+                    echo ""
+                    echo "⚠ Warning: Logged in as ${actual_email}, expected ${email}"
+                    echo "  The credentials will be saved under the expected slot."
+                fi
+
+                write_account_credentials "$id" "$email" "$new_creds"
+                echo ""
+                echo "✓ Credentials saved for ${id} (${email})"
+            else
+                echo ""
+                echo "✗ No fresh credentials captured for ${id}"
+            fi
+        else
+            echo ""
+            echo "✗ Login appears to have been cancelled for ${id}"
+        fi
+
+        rm -rf "$login_dir"
+    done
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "Interactive login complete. Run 'ccswitch --usage-all' to verify."
+}
+
 # Refresh all accounts with expired tokens using claude CLI
 cmd_refresh_all() {
     if ! command -v claude &>/dev/null; then
@@ -2020,6 +2143,9 @@ show_usage() {
     echo "  --env --creds-file <p> --config-dir <d>  Custom config dir + creds file"
     echo "  --env --unset                   Revert shell to global account"
     echo "  --refresh-all                   Refresh expired OAuth tokens for all accounts"
+    echo "  --login                          Interactive login for accounts with expired credentials"
+    echo "  --login --only <hash|email>      Log in to a specific account"
+    echo "  --login --force                  Re-login to all accounts (even if valid)"
     echo ""
     echo "Usage Monitoring:"
     echo "  --usage                          Show 5h block and weekly usage limits"
@@ -2122,6 +2248,10 @@ main() {
             ;;
         --refresh-all)
             cmd_refresh_all
+            ;;
+        --login)
+            shift
+            cmd_login "$@"
             ;;
         --backend)
             local b
