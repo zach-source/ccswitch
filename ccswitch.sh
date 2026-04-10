@@ -453,12 +453,21 @@ delete_account_credentials() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
-# OAuth Token Refresh
+# OAuth Token Refresh (via Claude CLI — the supported path)
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# We do NOT call the OAuth refresh endpoint directly. Per Anthropic:
+# - Direct refresh calls can invalidate Claude Code's active token
+# - Refresh tokens are single-use; concurrent refreshes race
+# - The supported automation path is `claude auth login` with env vars
+#   or long-lived setup tokens via `claude setup-token`
+#
+# Supported refresh methods:
+#   1. `claude auth login` with CLAUDE_CODE_OAUTH_REFRESH_TOKEN env var
+#   2. Long-lived CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`
+#   3. Interactive `claude auth login` (browser flow, used by --login)
 
-# Claude Code OAuth client ID (public, used by all Claude Code installations)
-readonly OAUTH_CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-readonly OAUTH_TOKEN_URL="https://console.anthropic.com/v1/oauth/token"
+readonly OAUTH_SCOPES="user:profile user:inference user:sessions:claude_code"
 
 # Check if a credential JSON blob has an expired access token
 _token_is_expired() {
@@ -467,94 +476,51 @@ _token_is_expired() {
 import sys, json, time
 d = json.loads('''$cred_json''')
 expires = d.get('claudeAiOauth', {}).get('expiresAt', 0)
-# expiresAt is milliseconds since epoch
 now_ms = int(time.time() * 1000)
 # Consider expired if less than 5 minutes remaining
 sys.exit(0 if expires < (now_ms + 300000) else 1)
 " 2>/dev/null
 }
 
-# Refresh an OAuth token using the refresh token. Returns updated cred JSON or empty on failure.
-_refresh_token() {
+# Refresh credentials using `claude auth login` with the refresh token env var.
+# This is the Anthropic-supported non-interactive refresh path.
+# Runs in a temp working directory to avoid polluting sessions.
+# Returns 0 on success, 1 on failure.
+_refresh_via_claude_auth() {
     local cred_json="$1"
+
+    # Extract the refresh token from the credential blob
     local refresh_token
     refresh_token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('refreshToken',''))" 2>/dev/null)
 
     if [[ -z "$refresh_token" ]]; then
+        echo "no refresh token" >&2
         return 1
     fi
 
-    local response
-    response=$(curl -s --max-time 15 -X POST "$OAUTH_TOKEN_URL" \
-        -H "Content-Type: application/json" \
-        -d "{\"grant_type\":\"refresh_token\",\"refresh_token\":\"$refresh_token\",\"client_id\":\"$OAUTH_CLIENT_ID\"}" 2>/dev/null)
-
-    if [[ -z "$response" ]]; then
-        return 1
-    fi
-
-    # Check for errors
-    local has_error
-    has_error=$(echo "$response" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); print('yes' if 'error' in d else 'no')" 2>/dev/null)
-    if [[ "$has_error" == "yes" ]]; then
-        local err_msg
-        err_msg=$(echo "$response" | python3 -c "import sys,json; d=json.loads(sys.stdin.read()); e=d.get('error',{}); print(e.get('message','unknown') if isinstance(e,dict) else str(e))" 2>/dev/null)
-        echo "$err_msg" >&2
-        return 1
-    fi
-
-    # Merge new tokens into existing credential blob
-    echo "$response" | python3 -c "
-import sys, json, time
-resp = json.loads(sys.stdin.read())
-cred = json.loads('''$cred_json''')
-oauth = cred.get('claudeAiOauth', {})
-oauth['accessToken'] = resp['access_token']
-if 'refresh_token' in resp:
-    oauth['refreshToken'] = resp['refresh_token']
-expires_in = resp.get('expires_in', 3600)
-oauth['expiresAt'] = int(time.time() * 1000) + expires_in * 1000
-cred['claudeAiOauth'] = oauth
-print(json.dumps(cred))
-" 2>/dev/null
-}
-
-# Refresh credentials via the claude CLI itself.
-# Uses CLAUDE_CONFIG_DIR with the account's credentials and runs a minimal
-# `claude -p` command. Claude Code handles the OAuth refresh internally
-# (including rate limits, one-time refresh tokens, etc).
-# Takes the credentials blob and returns the refreshed one, or empty on failure.
-_refresh_via_claude() {
-    local cred_json="$1"
+    # Run `claude auth login` in a temp dir with the refresh token env var.
+    # Claude CLI exchanges the refresh token for new credentials internally
+    # and writes them to the active keychain entry (macOS) or .credentials.json (Linux).
     local tmp_dir
     tmp_dir=$(mktemp -d -t ccswitch-refresh.XXXXXX)
-    trap 'rm -rf "$tmp_dir"' RETURN
 
-    # Write credentials to the temp config dir
-    echo "$cred_json" > "$tmp_dir/.credentials.json"
-    chmod 600 "$tmp_dir/.credentials.json"
+    (
+        cd "$tmp_dir"
+        CLAUDE_CODE_OAUTH_REFRESH_TOKEN="$refresh_token" \
+        CLAUDE_CODE_OAUTH_SCOPES="$OAUTH_SCOPES" \
+        claude auth login
+    ) >/dev/null 2>&1
+    local exit_code=$?
 
-    # Minimal onboarding state so claude doesn't prompt
-    echo '{"hasCompletedOnboarding": true}' > "$tmp_dir/.claude.json"
-
-    # Run a minimal prompt that forces Claude Code to authenticate.
-    # Use haiku (cheapest) and empty settings to skip hooks/MCP/plugins.
-    CLAUDE_CONFIG_DIR="$tmp_dir" claude -p "ok" \
-        --model claude-haiku-4-5-20251001 \
-        --settings '{"env":{},"permissions":{"allow":[],"deny":["*"]}}' \
-        --no-session-persistence \
-        >/dev/null 2>&1 || true
-
-    # Read back the (possibly refreshed) credentials
-    if [[ -f "$tmp_dir/.credentials.json" ]]; then
-        cat "$tmp_dir/.credentials.json"
-    else
-        return 1
-    fi
+    rm -rf "$tmp_dir"
+    return $exit_code
 }
 
 # Refresh credentials for a specific account. Updates the backend.
-# Tries claude CLI first (better refresh handling), falls back to direct API.
+# Uses `claude auth login` with the refresh token env var (supported path).
+# For the active account, operates on the live keychain entry.
+# For inactive accounts, switches temporarily, refreshes, then the caller
+# is responsible for reading back the refreshed credentials.
 refresh_account_token() {
     local account_id="$1"
     local email
@@ -579,35 +545,50 @@ refresh_account_token() {
         return 0  # Not expired, nothing to do
     fi
 
-    # Try refreshing via claude CLI (handles rate limits and one-time tokens better)
-    local new_creds
-    if command -v claude &>/dev/null; then
-        new_creds=$(_refresh_via_claude "$cred_json")
-        # Verify the refresh actually happened (expiresAt advanced)
-        if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
-            # Success - write back and return
-            if [[ "$account_id" == "$active_id" ]]; then
-                write_credentials "$new_creds"
-            else
-                write_account_credentials "$account_id" "$email" "$new_creds"
-            fi
-            return 0
-        fi
-    fi
-
-    # Fallback: attempt direct OAuth API refresh
-    new_creds=$(_refresh_token "$cred_json")
-    if [[ -z "$new_creds" ]]; then
+    if ! command -v claude &>/dev/null; then
+        echo "claude CLI not found" >&2
         return 1
     fi
 
-    # Write back to backend
     if [[ "$account_id" == "$active_id" ]]; then
-        write_credentials "$new_creds"
+        # Active account: refresh directly (claude writes to live keychain)
+        if _refresh_via_claude_auth "$cred_json"; then
+            # Read back refreshed credentials and update backup
+            local new_creds
+            new_creds=$(read_credentials)
+            if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
+                write_account_credentials "$account_id" "$email" "$new_creds"
+                return 0
+            fi
+        fi
     else
-        write_account_credentials "$account_id" "$email" "$new_creds"
+        # Inactive account: temporarily swap into active slot, refresh, swap back
+        local original_creds original_config
+        original_creds=$(read_credentials)
+        original_config=$(cat "$(get_claude_config_path)" 2>/dev/null)
+
+        # Put target account's creds into active slot
+        write_credentials "$cred_json"
+
+        # Refresh via claude auth login
+        if _refresh_via_claude_auth "$cred_json"; then
+            # Read refreshed creds from active slot
+            local new_creds
+            new_creds=$(read_credentials)
+            if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
+                # Save refreshed creds to backup
+                write_account_credentials "$account_id" "$email" "$new_creds"
+                # Restore original active creds
+                write_credentials "$original_creds"
+                return 0
+            fi
+        fi
+
+        # Restore original active credentials on failure
+        write_credentials "$original_creds"
     fi
-    return 0
+
+    return 1
 }
 
 # Save current active credentials to the backup slot
@@ -876,14 +857,11 @@ print(f'{(exp - time.time() * 1000) / 3600000:.1f}')
         fi
 
         # Token expired - try refreshing via claude CLI
-        echo -n "expired, refreshing via claude CLI... "
-        local new_creds
-        new_creds=$(_refresh_via_claude "$cred_json")
-        if [[ -n "$new_creds" ]] && ! _token_is_expired "$new_creds"; then
-            write_account_credentials "$id" "$email" "$new_creds"
+        echo -n "expired, refreshing via claude auth login... "
+        if refresh_account_token "$id"; then
             echo "✓"
         else
-            echo "✗ (refresh token likely invalidated - switch to this account and run claude to re-auth)"
+            echo "✗ (run 'ccswitch --login --only ${id}' to re-auth via browser)"
         fi
 
         sleep 1
