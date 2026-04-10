@@ -761,8 +761,11 @@ cmd_login() {
         echo "  - Type /exit or press Ctrl+D when done"
         echo ""
 
-        # Launch claude interactively - it will detect expired token and prompt for login
-        claude || true
+        # Launch claude in a temp directory so we don't pollute real project sessions
+        local login_workdir
+        login_workdir=$(mktemp -d -t ccswitch-login-session.XXXXXX)
+        (cd "$login_workdir" && claude) || true
+        rm -rf "$login_workdir"
 
         # After claude exits, capture the fresh credentials from the active keychain slot
         local new_creds
