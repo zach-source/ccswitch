@@ -1161,14 +1161,18 @@ _op_sequence_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - _sequence"
 }
 
-# Check that op CLI is installed and authed
+# Check that op CLI is installed and authed (for the configured account)
 _op_check() {
     if ! command -v op &>/dev/null; then
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    if ! op whoami &>/dev/null; then
-        echo "Error: 1Password CLI not signed in. Run: op signin" >&2
+    local op_args=()
+    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    if ! op "${op_args[@]}" whoami &>/dev/null; then
+        local target="${CCSWITCH_OP_ACCOUNT:-default account}"
+        echo "Error: 1Password CLI not signed in for ${target}." >&2
+        echo "Run: op ${op_args[*]} signin" >&2
         return 1
     fi
     return 0
