@@ -10,25 +10,120 @@ readonly BACKUP_DIR="$HOME/.claude-switch-backup"
 readonly SEQUENCE_FILE="$BACKUP_DIR/sequence.json"
 readonly SCHEMA_VERSION=2
 
+# Config file location (override via CCSWITCH_CONFIG_FILE)
+readonly CCSWITCH_CONFIG_FILE_DEFAULT="$HOME/.config/ccswitch/config.toml"
+CCSWITCH_CONFIG_FILE="${CCSWITCH_CONFIG_FILE:-$CCSWITCH_CONFIG_FILE_DEFAULT}"
+
 # Compute stable 8-char hex ID from email (SHA-256 prefix)
 hash_email() {
     local email="$1"
     echo -n "$email" | shasum -a 256 | cut -c1-8
 }
 
-# Credential backend: auto, keychain, file, 1password, vault
-# Set via CCSWITCH_BACKEND env var or --backend flag
-# "auto" = keychain on macOS, file on Linux
-CCSWITCH_BACKEND="${CCSWITCH_BACKEND:-auto}"
+# ═══════════════════════════════════════════════════════════════════════════
+# Config Loading: TOML + env var overrides
+# ═══════════════════════════════════════════════════════════════════════════
+# Precedence (highest wins): env var > TOML config > built-in default
+# TOML schema:
+#   [backend]
+#   type = "auto" | "keychain" | "file" | "1password" | "vault"
+#
+#   [backend.onepassword]
+#   vault = "Private"
+#   item_prefix = "Claude Code Account"
+#   account = ""          # optional op --account shorthand
+#
+#   [backend.vault]
+#   addr = "https://vault.example.com"
+#   path = "secret/data/ccswitch"
+#   token = ""            # or inherit VAULT_TOKEN
+#
+#   [sync]
+#   interval = 300        # daemon tick in seconds
+#
+#   [refresh]
+#   expiry_buffer_minutes = 5
+_load_config() {
+    # Parse TOML config if it exists and emit `KEY=value` lines.
+    # Env vars set before this function runs are NOT overridden.
+    local config_output=""
+    if [[ -f "$CCSWITCH_CONFIG_FILE" ]]; then
+        config_output=$(python3 -c "
+import sys, os
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib
+    except ImportError:
+        sys.exit(0)  # no TOML parser, silently skip
 
-# 1Password settings
-CCSWITCH_OP_VAULT="${CCSWITCH_OP_VAULT:-Private}"
-CCSWITCH_OP_ITEM_PREFIX="${CCSWITCH_OP_ITEM_PREFIX:-Claude Code Account}"
+try:
+    with open('$CCSWITCH_CONFIG_FILE', 'rb') as f:
+        cfg = tomllib.load(f)
+except Exception as e:
+    print(f'# Error parsing config: {e}', file=sys.stderr)
+    sys.exit(0)
 
-# HashiCorp Vault / OpenBao settings
-CCSWITCH_VAULT_ADDR="${CCSWITCH_VAULT_ADDR:-${VAULT_ADDR:-}}"
-CCSWITCH_VAULT_PATH="${CCSWITCH_VAULT_PATH:-secret/data/ccswitch}"
-CCSWITCH_VAULT_TOKEN="${CCSWITCH_VAULT_TOKEN:-${VAULT_TOKEN:-}}"
+# Map TOML paths to env var names
+mapping = {
+    ('backend', 'type'): 'CCSWITCH_BACKEND',
+    ('backend', 'onepassword', 'vault'): 'CCSWITCH_OP_VAULT',
+    ('backend', 'onepassword', 'item_prefix'): 'CCSWITCH_OP_ITEM_PREFIX',
+    ('backend', 'onepassword', 'account'): 'CCSWITCH_OP_ACCOUNT',
+    ('backend', 'vault', 'addr'): 'CCSWITCH_VAULT_ADDR',
+    ('backend', 'vault', 'path'): 'CCSWITCH_VAULT_PATH',
+    ('backend', 'vault', 'token'): 'CCSWITCH_VAULT_TOKEN',
+    ('sync', 'interval'): 'CCSWITCH_SYNC_INTERVAL',
+    ('refresh', 'expiry_buffer_minutes'): 'CCSWITCH_EXPIRY_BUFFER_MINUTES',
+}
+
+def dig(d, path):
+    for k in path:
+        if not isinstance(d, dict) or k not in d:
+            return None
+        d = d[k]
+    return d
+
+for path, var in mapping.items():
+    val = dig(cfg, path)
+    if val is not None:
+        # Shell-escape the value (single quotes, escape single quotes inside)
+        s = str(val).replace(\"'\", \"'\\\\''\")
+        print(f\"{var}='{s}'\")
+" 2>/dev/null)
+    fi
+
+    # Apply each config line only if the env var is not already set
+    if [[ -n "$config_output" ]]; then
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            [[ "$line" == \#* ]] && continue
+            local var_name="${line%%=*}"
+            # If the var is already set in environment, skip (env wins)
+            if [[ -z "${!var_name:-}" ]]; then
+                eval "export $line"
+            fi
+        done <<< "$config_output"
+    fi
+
+    # Apply built-in defaults for anything still unset
+    : "${CCSWITCH_BACKEND:=auto}"
+    : "${CCSWITCH_OP_VAULT:=Private}"
+    : "${CCSWITCH_OP_ITEM_PREFIX:=Claude Code Account}"
+    : "${CCSWITCH_OP_ACCOUNT:=}"
+    : "${CCSWITCH_VAULT_ADDR:=${VAULT_ADDR:-}}"
+    : "${CCSWITCH_VAULT_PATH:=secret/data/ccswitch}"
+    : "${CCSWITCH_VAULT_TOKEN:=${VAULT_TOKEN:-}}"
+    : "${CCSWITCH_SYNC_INTERVAL:=300}"
+    : "${CCSWITCH_EXPIRY_BUFFER_MINUTES:=5}"
+    export CCSWITCH_BACKEND CCSWITCH_OP_VAULT CCSWITCH_OP_ITEM_PREFIX CCSWITCH_OP_ACCOUNT
+    export CCSWITCH_VAULT_ADDR CCSWITCH_VAULT_PATH CCSWITCH_VAULT_TOKEN
+    export CCSWITCH_SYNC_INTERVAL CCSWITCH_EXPIRY_BUFFER_MINUTES
+}
+
+# Load config immediately so all subsequent code sees resolved values
+_load_config
 
 # Container detection
 is_running_in_container() {
@@ -304,13 +399,22 @@ _op_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - ${account_label}"
 }
 
+# Build op CLI args array honoring CCSWITCH_OP_ACCOUNT
+_op_args() {
+    local args=()
+    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    printf '%s\n' "${args[@]}"
+}
+
 _op_read() {
     local item_name="$1"
     if ! command -v op &>/dev/null; then
         echo ""
         return
     fi
-    op item get "$item_name" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
+    local op_args=()
+    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
 }
 
 _op_write() {
@@ -319,20 +423,21 @@ _op_write() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    # Check if item exists
-    if op item get "$item_name" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
-        # Update existing item
-        op item edit "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+    local op_args=()
+    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    if op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
+        op item edit "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
     else
-        # Create new item
-        op item create --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+        op item create "${op_args[@]}" --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
     fi
 }
 
 _op_delete() {
     local item_name="$1"
     if command -v op &>/dev/null; then
-        op item delete "$item_name" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
+        local op_args=()
+        [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+        op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
     fi
 }
 
@@ -1081,6 +1186,104 @@ try:
 except:
     print(0)
 " 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Config Commands
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Print the effective configuration (merged from defaults + TOML + env)
+cmd_config() {
+    local resolved_backend
+    resolved_backend=$(_resolve_backend)
+
+    echo "ccswitch configuration:"
+    echo ""
+    echo "  Config file:    ${CCSWITCH_CONFIG_FILE}"
+    if [[ -f "$CCSWITCH_CONFIG_FILE" ]]; then
+        echo "  Config exists:  yes"
+    else
+        echo "  Config exists:  no (using defaults — run 'ccswitch --init-config' to create)"
+    fi
+    echo ""
+    echo "[backend]"
+    echo "  type = \"${CCSWITCH_BACKEND}\"   (resolved: ${resolved_backend})"
+    echo ""
+    if [[ "$resolved_backend" == "1password" ]] || [[ "$CCSWITCH_BACKEND" == "1password" ]]; then
+        echo "[backend.onepassword]"
+        echo "  vault       = \"${CCSWITCH_OP_VAULT}\""
+        echo "  item_prefix = \"${CCSWITCH_OP_ITEM_PREFIX}\""
+        [[ -n "$CCSWITCH_OP_ACCOUNT" ]] && echo "  account     = \"${CCSWITCH_OP_ACCOUNT}\""
+        echo ""
+    fi
+    if [[ "$resolved_backend" == "vault" ]] || [[ "$CCSWITCH_BACKEND" == "vault" ]]; then
+        echo "[backend.vault]"
+        echo "  addr  = \"${CCSWITCH_VAULT_ADDR:-<not set>}\""
+        echo "  path  = \"${CCSWITCH_VAULT_PATH}\""
+        echo "  token = $([ -n "$CCSWITCH_VAULT_TOKEN" ] && echo "<set>" || echo "<not set>")"
+        echo ""
+    fi
+    echo "[sync]"
+    echo "  interval = ${CCSWITCH_SYNC_INTERVAL}  # seconds"
+    echo ""
+    echo "[refresh]"
+    echo "  expiry_buffer_minutes = ${CCSWITCH_EXPIRY_BUFFER_MINUTES}"
+}
+
+# Generate a commented TOML template at the config file location
+cmd_init_config() {
+    if [[ -f "$CCSWITCH_CONFIG_FILE" ]]; then
+        echo "Config already exists at: $CCSWITCH_CONFIG_FILE"
+        echo "Remove or move it first to regenerate."
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$CCSWITCH_CONFIG_FILE")"
+    cat > "$CCSWITCH_CONFIG_FILE" <<'EOF'
+# ccswitch configuration
+# Documentation: https://github.com/zach-source/ccswitch
+#
+# Precedence (highest wins): env vars > this file > built-in defaults
+
+[backend]
+# Where ccswitch stores credentials.
+# Options: "auto" (keychain on macOS, file on Linux), "keychain", "file",
+#          "1password", "vault"
+type = "auto"
+
+# ─── 1Password backend ─────────────────────────────────────────────────────
+# Requires: 1Password CLI (`op`) installed and signed in.
+# Example: op signin (or enable Touch ID + 1Password app integration)
+[backend.onepassword]
+vault = "Private"
+item_prefix = "Claude Code Account"
+# account = ""   # optional: op --account shorthand (e.g. "my.1password.com")
+
+# ─── HashiCorp Vault / OpenBao backend ─────────────────────────────────────
+# Requires: `vault` or `bao` CLI on PATH.
+# Auth: token is read from config, CCSWITCH_VAULT_TOKEN env, or VAULT_TOKEN.
+[backend.vault]
+# addr = "https://vault.example.com"
+path = "secret/data/ccswitch"
+# token = ""
+
+# ─── Sync (1Password daemon) ───────────────────────────────────────────────
+[sync]
+# How often the sync daemon reconciles local with 1Password (in seconds)
+interval = 300
+
+# ─── Refresh behavior ──────────────────────────────────────────────────────
+[refresh]
+# A token is considered "expired" this many minutes before actual expiry
+expiry_buffer_minutes = 5
+EOF
+    chmod 600 "$CCSWITCH_CONFIG_FILE"
+    echo "Created config template: $CCSWITCH_CONFIG_FILE"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Edit the file and set [backend].type to your preferred backend"
+    echo "  2. Run 'ccswitch --config' to verify"
+    echo "  3. For 1Password: run 'ccswitch --push' to seed the vault"
 }
 
 # Push: Push local credentials + sequence.json to 1Password.
@@ -2426,10 +2629,16 @@ show_usage() {
     echo "  --use-anthropic                  Revert to default Anthropic API"
     echo "  --api-status                     Show current API configuration"
     echo ""
-    echo "Credential Backend:"
-    echo "  --backend                        Show current credential backend"
+    echo "Configuration:"
+    echo "  --config                         Show effective configuration"
+    echo "  --init-config                    Create a TOML config template at ~/.config/ccswitch/config.toml"
+    echo "  --backend                        Show current credential backend (alias for part of --config)"
+    echo ""
+    echo "Config file: ${CCSWITCH_CONFIG_FILE}"
+    echo "Env overrides:"
     echo "  CCSWITCH_BACKEND=<backend>       Set backend: auto, keychain, file, 1password, vault"
     echo "  CCSWITCH_OP_VAULT=<vault>        1Password vault (default: Private)"
+    echo "  CCSWITCH_OP_ACCOUNT=<shorthand>  1Password account shorthand (for --account)"
     echo "  CCSWITCH_VAULT_ADDR=<url>        Vault/OpenBao address"
     echo "  CCSWITCH_VAULT_PATH=<path>       Vault KV path (default: secret/data/ccswitch)"
     echo ""
@@ -2527,6 +2736,12 @@ main() {
         --login)
             shift
             cmd_login "$@"
+            ;;
+        --config)
+            cmd_config
+            ;;
+        --init-config)
+            cmd_init_config
             ;;
         --push)
             cmd_push
