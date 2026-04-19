@@ -1045,6 +1045,304 @@ account_exists() {
     jq -e --arg email "$email" '.accounts[] | select(.email == $email)' "$SEQUENCE_FILE" >/dev/null 2>&1
 }
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 1Password Sync
+# Push local credentials + sequence.json to 1Password; pull them back.
+# "Newest wins" based on credential expiresAt + sequence.json lastUpdated.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Name of the 1Password item that holds sequence.json metadata
+_op_sequence_item_name() {
+    echo "${CCSWITCH_OP_ITEM_PREFIX} - _sequence"
+}
+
+# Check that op CLI is installed and authed
+_op_check() {
+    if ! command -v op &>/dev/null; then
+        echo "Error: 1password-cli (op) not installed" >&2
+        return 1
+    fi
+    if ! op whoami &>/dev/null; then
+        echo "Error: 1Password CLI not signed in. Run: op signin" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Extract expiresAt from a credential JSON blob (in ms), 0 if missing
+_cred_expires_ms() {
+    local cred_json="$1"
+    [[ -z "$cred_json" ]] && { echo "0"; return; }
+    echo "$cred_json" | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read())
+    print(d.get('claudeAiOauth', {}).get('expiresAt', 0))
+except:
+    print(0)
+" 2>/dev/null
+}
+
+# Push: Push local credentials + sequence.json to 1Password.
+# Overwrites 1Password with local state.
+cmd_push() {
+    _op_check || return 1
+    [[ ! -f "$SEQUENCE_FILE" ]] && { echo "No local sequence file"; return 1; }
+
+    echo "Pushing credentials to 1Password..."
+    echo "  Vault: ${CCSWITCH_OP_VAULT}"
+    echo ""
+
+    local ids
+    ids=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
+    local active_id
+    active_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+
+    # Save current backend, push via 1password backend directly
+    local saved_backend="${CCSWITCH_BACKEND}"
+
+    local pushed=0 skipped=0
+    for id in $ids; do
+        local email
+        email=$(get_account_email "$id")
+        local cred_json
+
+        # Read from current backend (not forced to 1password)
+        if [[ "$id" == "$active_id" ]]; then
+            cred_json=$(CCSWITCH_BACKEND="$saved_backend" read_credentials)
+        else
+            cred_json=$(CCSWITCH_BACKEND="$saved_backend" read_account_credentials "$id" "$email")
+        fi
+
+        if [[ -z "$cred_json" ]]; then
+            echo "  ${id} ${email}: no local credentials, skipping"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        # Push to 1Password
+        if _op_write "$(_op_item_name "${id}-${email}")" "$cred_json"; then
+            local exp_ms
+            exp_ms=$(_cred_expires_ms "$cred_json")
+            local hours
+            hours=$(python3 -c "import time; print(f'{($exp_ms - time.time()*1000)/3600000:.1f}')" 2>/dev/null)
+            echo "  ${id} ${email}: pushed (expires in ${hours}h)"
+            pushed=$((pushed + 1))
+        else
+            echo "  ${id} ${email}: push failed"
+        fi
+    done
+
+    # Push sequence.json (without switchLog to keep size reasonable)
+    echo ""
+    echo -n "Pushing sequence metadata... "
+    local seq_content
+    seq_content=$(jq 'del(.switchLog)' "$SEQUENCE_FILE")
+    if _op_write "$(_op_sequence_item_name)" "$seq_content"; then
+        echo "✓"
+    else
+        echo "✗"
+    fi
+
+    echo ""
+    echo "Summary: ${pushed} pushed, ${skipped} skipped"
+}
+
+# Pull: Pull credentials + sequence.json from 1Password to local.
+# Overwrites local with 1Password state.
+cmd_pull() {
+    _op_check || return 1
+
+    echo "Pulling credentials from 1Password..."
+    echo "  Vault: ${CCSWITCH_OP_VAULT}"
+    echo ""
+
+    # Pull sequence.json first
+    local remote_seq
+    remote_seq=$(_op_read "$(_op_sequence_item_name)")
+    if [[ -z "$remote_seq" ]]; then
+        echo "Error: No sequence item found in 1Password (expected: $(_op_sequence_item_name))"
+        echo "Run 'ccswitch --push' first from a machine with credentials."
+        return 1
+    fi
+
+    # Backup existing sequence before overwriting
+    if [[ -f "$SEQUENCE_FILE" ]]; then
+        cp "$SEQUENCE_FILE" "${SEQUENCE_FILE}.pre-pull"
+    else
+        setup_directories
+    fi
+
+    # Preserve local switchLog if it exists
+    local local_switchlog
+    local_switchlog=$(jq -c '.switchLog // []' "$SEQUENCE_FILE" 2>/dev/null || echo "[]")
+
+    echo "$remote_seq" | jq --argjson log "$local_switchlog" '.switchLog = $log' > "$SEQUENCE_FILE"
+    echo "Pulled sequence metadata ✓"
+    echo ""
+
+    # Now pull each account's credentials
+    local ids
+    ids=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
+    local active_id
+    active_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+
+    local pulled=0 skipped=0
+    for id in $ids; do
+        local email
+        email=$(get_account_email "$id")
+        local remote_cred
+        remote_cred=$(_op_read "$(_op_item_name "${id}-${email}")")
+
+        if [[ -z "$remote_cred" ]]; then
+            echo "  ${id} ${email}: not in 1Password, skipping"
+            skipped=$((skipped + 1))
+            continue
+        fi
+
+        # Write to current backend
+        if [[ "$id" == "$active_id" ]]; then
+            write_credentials "$remote_cred"
+        fi
+        write_account_credentials "$id" "$email" "$remote_cred"
+
+        local exp_ms hours
+        exp_ms=$(_cred_expires_ms "$remote_cred")
+        hours=$(python3 -c "import time; print(f'{($exp_ms - time.time()*1000)/3600000:.1f}')" 2>/dev/null)
+        echo "  ${id} ${email}: pulled (expires in ${hours}h)"
+        pulled=$((pulled + 1))
+    done
+
+    echo ""
+    echo "Summary: ${pulled} pulled, ${skipped} skipped"
+}
+
+# Sync: Bi-directional sync between local and 1Password.
+# For each account, keep the credential with the later expiresAt.
+# Used by the daemon for continuous sync.
+cmd_sync() {
+    local quiet="false"
+    [[ "${1:-}" == "--quiet" ]] && quiet="true"
+
+    _op_check || return 1
+    [[ ! -f "$SEQUENCE_FILE" ]] && { $quiet || echo "No local sequence file"; return 1; }
+
+    local log_fn
+    if $quiet; then
+        log_fn() { :; }
+    else
+        log_fn() { echo "  $*"; }
+    fi
+
+    $quiet || echo "Syncing with 1Password (vault: ${CCSWITCH_OP_VAULT})..."
+
+    # Sync sequence.json: newest lastUpdated wins
+    local remote_seq local_updated remote_updated
+    remote_seq=$(_op_read "$(_op_sequence_item_name)")
+
+    if [[ -z "$remote_seq" ]]; then
+        # No remote state — push our local state
+        log_fn "No remote sequence; pushing local state"
+        local seq_content
+        seq_content=$(jq 'del(.switchLog)' "$SEQUENCE_FILE")
+        _op_write "$(_op_sequence_item_name)" "$seq_content"
+    else
+        local_updated=$(jq -r '.lastUpdated // ""' "$SEQUENCE_FILE")
+        remote_updated=$(echo "$remote_seq" | jq -r '.lastUpdated // ""')
+
+        if [[ "$remote_updated" > "$local_updated" ]]; then
+            # Remote is newer — merge accounts (preserve local switchLog)
+            log_fn "Remote sequence newer (${remote_updated} > ${local_updated}); pulling"
+            local local_switchlog
+            local_switchlog=$(jq -c '.switchLog // []' "$SEQUENCE_FILE")
+            echo "$remote_seq" | jq --argjson log "$local_switchlog" '.switchLog = $log' > "$SEQUENCE_FILE"
+        elif [[ "$local_updated" > "$remote_updated" ]]; then
+            log_fn "Local sequence newer (${local_updated} > ${remote_updated}); pushing"
+            local seq_content
+            seq_content=$(jq 'del(.switchLog)' "$SEQUENCE_FILE")
+            _op_write "$(_op_sequence_item_name)" "$seq_content"
+        fi
+    fi
+
+    # Sync each account's credentials: newest expiresAt wins
+    local ids
+    ids=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
+    local active_id
+    active_id=$(jq -r '.activeAccountId' "$SEQUENCE_FILE")
+
+    local pushed=0 pulled=0 nop=0
+    for id in $ids; do
+        local email
+        email=$(get_account_email "$id")
+
+        local local_cred remote_cred
+        if [[ "$id" == "$active_id" ]]; then
+            local_cred=$(read_credentials)
+        else
+            local_cred=$(read_account_credentials "$id" "$email")
+        fi
+        remote_cred=$(_op_read "$(_op_item_name "${id}-${email}")")
+
+        local local_exp remote_exp
+        local_exp=$(_cred_expires_ms "$local_cred")
+        remote_exp=$(_cred_expires_ms "$remote_cred")
+
+        if [[ -n "$local_cred" ]] && [[ -z "$remote_cred" ]]; then
+            # Local only — push
+            _op_write "$(_op_item_name "${id}-${email}")" "$local_cred"
+            log_fn "${id} ${email}: pushed (new in 1Password)"
+            pushed=$((pushed + 1))
+        elif [[ -z "$local_cred" ]] && [[ -n "$remote_cred" ]]; then
+            # Remote only — pull
+            if [[ "$id" == "$active_id" ]]; then
+                write_credentials "$remote_cred"
+            fi
+            write_account_credentials "$id" "$email" "$remote_cred"
+            log_fn "${id} ${email}: pulled (new locally)"
+            pulled=$((pulled + 1))
+        elif [[ "$local_exp" -gt "$remote_exp" ]]; then
+            # Local is newer — push
+            _op_write "$(_op_item_name "${id}-${email}")" "$local_cred"
+            log_fn "${id} ${email}: pushed (local fresher)"
+            pushed=$((pushed + 1))
+        elif [[ "$remote_exp" -gt "$local_exp" ]]; then
+            # Remote is newer — pull
+            if [[ "$id" == "$active_id" ]]; then
+                write_credentials "$remote_cred"
+            fi
+            write_account_credentials "$id" "$email" "$remote_cred"
+            log_fn "${id} ${email}: pulled (remote fresher)"
+            pulled=$((pulled + 1))
+        else
+            nop=$((nop + 1))
+        fi
+    done
+
+    $quiet || echo "Sync complete: ${pushed} pushed, ${pulled} pulled, ${nop} unchanged"
+}
+
+# Daemon: Run sync continuously in background.
+# Intended to be launched via launchd (macOS) or systemd user unit (Linux).
+cmd_daemon() {
+    local interval="${CCSWITCH_SYNC_INTERVAL:-300}"  # 5 min default
+    local log_file="${CCSWITCH_DAEMON_LOG:-$HOME/.claude-switch-backup/daemon.log}"
+
+    echo "ccswitch sync daemon starting (interval: ${interval}s, log: ${log_file})"
+    mkdir -p "$(dirname "$log_file")"
+
+    # Graceful shutdown
+    trap 'echo "[$(date -u +%FT%TZ)] daemon stopped" >> "$log_file"; exit 0' TERM INT
+
+    while true; do
+        {
+            echo "[$(date -u +%FT%TZ)] sync tick"
+            cmd_sync 2>&1
+        } >> "$log_file" 2>&1
+
+        sleep "$interval"
+    done
+}
+
 # Add account
 cmd_add_account() {
     setup_directories
@@ -2135,6 +2433,12 @@ show_usage() {
     echo "  CCSWITCH_VAULT_ADDR=<url>        Vault/OpenBao address"
     echo "  CCSWITCH_VAULT_PATH=<path>       Vault KV path (default: secret/data/ccswitch)"
     echo ""
+    echo "1Password Sync:"
+    echo "  --push                           Push all local credentials + metadata to 1Password"
+    echo "  --pull                           Pull all credentials + metadata from 1Password"
+    echo "  --sync [--quiet]                 Bi-directional sync (newest-expiry wins)"
+    echo "  --daemon                         Run sync loop continuously (CCSWITCH_SYNC_INTERVAL, default 300s)"
+    echo ""
     echo "  --help                           Show this help message"
     echo ""
     echo "Examples:"
@@ -2223,6 +2527,19 @@ main() {
         --login)
             shift
             cmd_login "$@"
+            ;;
+        --push)
+            cmd_push
+            ;;
+        --pull)
+            cmd_pull
+            ;;
+        --sync)
+            shift
+            cmd_sync "$@"
+            ;;
+        --daemon)
+            cmd_daemon
             ;;
         --backend)
             local b
