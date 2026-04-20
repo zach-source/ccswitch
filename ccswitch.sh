@@ -71,6 +71,9 @@ mapping = {
     ('backend', 'onepassword', 'vault'): 'CCSWITCH_OP_VAULT',
     ('backend', 'onepassword', 'item_prefix'): 'CCSWITCH_OP_ITEM_PREFIX',
     ('backend', 'onepassword', 'account'): 'CCSWITCH_OP_ACCOUNT',
+    ('backend', 'onepassword', 'connect_host'): 'CCSWITCH_OP_CONNECT_HOST',
+    ('backend', 'onepassword', 'connect_token_keychain_service'): 'CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE',
+    ('backend', 'onepassword', 'connect_token_keychain_account'): 'CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT',
     ('backend', 'vault', 'addr'): 'CCSWITCH_VAULT_ADDR',
     ('backend', 'vault', 'path'): 'CCSWITCH_VAULT_PATH',
     ('backend', 'vault', 'token'): 'CCSWITCH_VAULT_TOKEN',
@@ -112,14 +115,62 @@ for path, var in mapping.items():
     : "${CCSWITCH_OP_VAULT:=Private}"
     : "${CCSWITCH_OP_ITEM_PREFIX:=Claude Code Account}"
     : "${CCSWITCH_OP_ACCOUNT:=}"
+    : "${CCSWITCH_OP_CONNECT_HOST:=${OP_CONNECT_HOST:-}}"
+    : "${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE:=ccswitch-op-connect-token}"
+    : "${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT:=ccswitch}"
     : "${CCSWITCH_VAULT_ADDR:=${VAULT_ADDR:-}}"
     : "${CCSWITCH_VAULT_PATH:=secret/data/ccswitch}"
     : "${CCSWITCH_VAULT_TOKEN:=${VAULT_TOKEN:-}}"
     : "${CCSWITCH_SYNC_INTERVAL:=300}"
     : "${CCSWITCH_EXPIRY_BUFFER_MINUTES:=5}"
     export CCSWITCH_BACKEND CCSWITCH_OP_VAULT CCSWITCH_OP_ITEM_PREFIX CCSWITCH_OP_ACCOUNT
+    export CCSWITCH_OP_CONNECT_HOST CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT
     export CCSWITCH_VAULT_ADDR CCSWITCH_VAULT_PATH CCSWITCH_VAULT_TOKEN
     export CCSWITCH_SYNC_INTERVAL CCSWITCH_EXPIRY_BUFFER_MINUTES
+
+    # Propagate Connect mode to op CLI env vars that the CLI recognizes natively
+    if [[ -n "$CCSWITCH_OP_CONNECT_HOST" ]]; then
+        export OP_CONNECT_HOST="$CCSWITCH_OP_CONNECT_HOST"
+        _op_load_connect_token
+    fi
+}
+
+# Load Connect token from keychain/file into OP_CONNECT_TOKEN if not already set.
+# Keychain (macOS): security find-generic-password -a <account> -s <service> -w
+# Fallback (Linux): ~/.config/ccswitch/connect-token (0600)
+_op_load_connect_token() {
+    [[ -n "${OP_CONNECT_TOKEN:-}" ]] && return 0
+
+    # Try macOS Keychain first
+    if command -v security &>/dev/null; then
+        local tok
+        tok=$(security find-generic-password \
+            -a "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT" \
+            -s "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE" \
+            -w 2>/dev/null || true)
+        if [[ -n "$tok" ]]; then
+            export OP_CONNECT_TOKEN="$tok"
+            return 0
+        fi
+    fi
+
+    # Linux / fallback: file at ~/.config/ccswitch/connect-token
+    local token_file="${HOME}/.config/ccswitch/connect-token"
+    if [[ -f "$token_file" ]]; then
+        local tok
+        tok=$(<"$token_file")
+        if [[ -n "$tok" ]]; then
+            export OP_CONNECT_TOKEN="$tok"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
+# True if running in Connect mode (OP_CONNECT_HOST configured + token loaded)
+_op_is_connect() {
+    [[ -n "${OP_CONNECT_HOST:-}" ]] && [[ -n "${OP_CONNECT_TOKEN:-}" ]]
 }
 
 # Load config immediately so all subsequent code sees resolved values
@@ -399,11 +450,24 @@ _op_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - ${account_label}"
 }
 
-# Build op CLI args array honoring CCSWITCH_OP_ACCOUNT
+# Build op CLI args array.
+# In Connect mode, --account is forbidden (token is already scoped to a server).
+# In signed-in mode, pass --account if CCSWITCH_OP_ACCOUNT is set.
 _op_args() {
     local args=()
-    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    if ! _op_is_connect && [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]]; then
+        args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    fi
     printf '%s\n' "${args[@]}"
+}
+
+# Helper: populate an array of op args by reference
+_op_fill_args() {
+    local -n _out=$1
+    _out=()
+    if ! _op_is_connect && [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]]; then
+        _out+=(--account "$CCSWITCH_OP_ACCOUNT")
+    fi
 }
 
 _op_read() {
@@ -412,8 +476,8 @@ _op_read() {
         echo ""
         return
     fi
-    local op_args=()
-    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    local op_args
+    _op_fill_args op_args
     op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
 }
 
@@ -423,8 +487,8 @@ _op_write() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    local op_args=()
-    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+    local op_args
+    _op_fill_args op_args
     if op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
         op item edit "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
     else
@@ -435,8 +499,8 @@ _op_write() {
 _op_delete() {
     local item_name="$1"
     if command -v op &>/dev/null; then
-        local op_args=()
-        [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
+        local op_args
+        _op_fill_args op_args
         op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
     fi
 }
@@ -1161,18 +1225,34 @@ _op_sequence_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - _sequence"
 }
 
-# Check that op CLI is installed and authed (for the configured account)
+# Check that op CLI is installed and can reach the configured backend.
+# Probe: `op vault list` — works in both Connect and signed-in modes,
+# and is non-interactive (no biometric prompt for signed-in sessions).
 _op_check() {
     if ! command -v op &>/dev/null; then
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    local op_args=()
-    [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]] && op_args+=(--account "$CCSWITCH_OP_ACCOUNT")
-    if ! op "${op_args[@]}" whoami &>/dev/null; then
-        local target="${CCSWITCH_OP_ACCOUNT:-default account}"
-        echo "Error: 1Password CLI not signed in for ${target}." >&2
-        echo "Run: op ${op_args[*]} signin" >&2
+
+    local op_args
+    _op_fill_args op_args
+
+    # In Connect mode, make sure we managed to load a token
+    if [[ -n "${CCSWITCH_OP_CONNECT_HOST:-}" ]] && [[ -z "${OP_CONNECT_TOKEN:-}" ]]; then
+        echo "Error: OP_CONNECT_HOST is configured (${CCSWITCH_OP_CONNECT_HOST}) but no OP_CONNECT_TOKEN found." >&2
+        echo "Run: ccswitch --setup-op-connect" >&2
+        return 1
+    fi
+
+    if ! op vault list "${op_args[@]}" --format=json &>/dev/null; then
+        if _op_is_connect; then
+            echo "Error: 1Password Connect probe failed at ${OP_CONNECT_HOST}." >&2
+            echo "Verify the server is reachable and OP_CONNECT_TOKEN is valid." >&2
+        else
+            local target="${CCSWITCH_OP_ACCOUNT:-default account}"
+            echo "Error: 1Password CLI not signed in for ${target}." >&2
+            echo "Run: op ${op_args[*]} signin" >&2
+        fi
         return 1
     fi
     return 0
@@ -1218,6 +1298,13 @@ cmd_config() {
         echo "  vault       = \"${CCSWITCH_OP_VAULT}\""
         echo "  item_prefix = \"${CCSWITCH_OP_ITEM_PREFIX}\""
         [[ -n "$CCSWITCH_OP_ACCOUNT" ]] && echo "  account     = \"${CCSWITCH_OP_ACCOUNT}\""
+        if [[ -n "${CCSWITCH_OP_CONNECT_HOST:-}" ]]; then
+            echo "  mode        = Connect"
+            echo "  connect_host = \"${CCSWITCH_OP_CONNECT_HOST}\""
+            echo "  token       = $([ -n "${OP_CONNECT_TOKEN:-}" ] && echo "<loaded>" || echo "<missing — run ccswitch --setup-op-connect>")"
+        else
+            echo "  mode        = Signed-in CLI"
+        fi
         echo ""
     fi
     if [[ "$resolved_backend" == "vault" ]] || [[ "$CCSWITCH_BACKEND" == "vault" ]]; then
@@ -1256,12 +1343,21 @@ cmd_init_config() {
 type = "auto"
 
 # ─── 1Password backend ─────────────────────────────────────────────────────
-# Requires: 1Password CLI (`op`) installed and signed in.
-# Example: op signin (or enable Touch ID + 1Password app integration)
+# Two modes:
+#   A. Signed-in mode — `op` CLI signed into an account (desktop app or CLI).
+#      Requires biometric unlock on some operations.
+#   B. Connect mode — routes through a 1Password Connect server. No biometric.
+#      Set connect_host below. Token is read from macOS Keychain (or ~/.config/
+#      ccswitch/connect-token on Linux). Run `ccswitch --setup-op-connect`.
 [backend.onepassword]
 vault = "Private"
 item_prefix = "Claude Code Account"
-# account = ""   # optional: op --account shorthand (e.g. "my.1password.com")
+# account = ""   # optional: op --account shorthand (signed-in mode only)
+
+# Connect mode (takes precedence when set; `account` is ignored):
+# connect_host = "https://op-connect.example.com"
+# connect_token_keychain_service = "ccswitch-op-connect-token"
+# connect_token_keychain_account = "ccswitch"
 
 # ─── HashiCorp Vault / OpenBao backend ─────────────────────────────────────
 # Requires: `vault` or `bao` CLI on PATH.
@@ -1288,6 +1384,134 @@ EOF
     echo "  1. Edit the file and set [backend].type to your preferred backend"
     echo "  2. Run 'ccswitch --config' to verify"
     echo "  3. For 1Password: run 'ccswitch --push' to seed the vault"
+}
+
+# Interactive setup for 1Password Connect.
+# Prompts for the Connect URL + token, stores token in macOS Keychain
+# (or ~/.config/ccswitch/connect-token on Linux), writes/updates TOML config,
+# and verifies by listing the vault.
+cmd_setup_op_connect() {
+    echo "Setting up 1Password Connect for ccswitch"
+    echo ""
+
+    # Prompt for URL
+    local current_host="${CCSWITCH_OP_CONNECT_HOST:-${OP_CONNECT_HOST:-}}"
+    local default_prompt=""
+    [[ -n "$current_host" ]] && default_prompt=" [$current_host]"
+    local connect_host=""
+    read -r -p "Connect server URL${default_prompt}: " connect_host
+    [[ -z "$connect_host" ]] && connect_host="$current_host"
+    if [[ -z "$connect_host" ]]; then
+        echo "Error: Connect URL required" >&2
+        return 1
+    fi
+    if [[ ! "$connect_host" =~ ^https?:// ]]; then
+        echo "Error: URL must start with http:// or https://" >&2
+        return 1
+    fi
+
+    # Prompt for token (hidden)
+    local token=""
+    read -r -s -p "Connect access token (input hidden): " token
+    echo ""
+    if [[ -z "$token" ]]; then
+        echo "Error: Token required" >&2
+        return 1
+    fi
+
+    local service="${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE}"
+    local account="${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT}"
+
+    # Store token
+    if command -v security &>/dev/null; then
+        # Delete any prior entry so we replace cleanly
+        security delete-generic-password -a "$account" -s "$service" &>/dev/null || true
+        # -U: update existing; -T /usr/bin/security: allow the security CLI to
+        # read the password without prompting (needed for the launchd daemon).
+        # The login keychain being unlocked is still required.
+        if ! security add-generic-password \
+             -a "$account" \
+             -s "$service" \
+             -w "$token" \
+             -U \
+             -T /usr/bin/security \
+             2>/dev/null; then
+            echo "Error: failed to store token in macOS Keychain" >&2
+            return 1
+        fi
+        echo "Stored token in macOS Keychain (service=$service, account=$account)"
+    else
+        local token_file="${HOME}/.config/ccswitch/connect-token"
+        mkdir -p "$(dirname "$token_file")"
+        printf '%s' "$token" > "$token_file"
+        chmod 600 "$token_file"
+        echo "Stored token at $token_file (0600)"
+    fi
+
+    # Write/update TOML config with connect_host
+    mkdir -p "$(dirname "$CCSWITCH_CONFIG_FILE")"
+    if [[ ! -f "$CCSWITCH_CONFIG_FILE" ]]; then
+        cmd_init_config >/dev/null
+    fi
+    # Best-effort in-place patch using python for TOML round-trip
+    local patch_ok=1
+    python3 - "$CCSWITCH_CONFIG_FILE" "$connect_host" "$service" "$account" <<'PYEOF'
+import sys, re, pathlib
+
+path, host, service, account = sys.argv[1:5]
+text = pathlib.Path(path).read_text()
+
+# Ensure backend type is 1password
+if re.search(r'(?m)^\s*type\s*=\s*"[^"]*"\s*$', text):
+    text = re.sub(r'(?m)^\s*type\s*=\s*"[^"]*"\s*$', 'type = "1password"', text, count=1)
+else:
+    text = '[backend]\ntype = "1password"\n\n' + text
+
+pattern = re.compile(r'(\[backend\.onepassword\][^\[]*)', re.DOTALL)
+m = pattern.search(text)
+new_lines = [
+    f'connect_host = "{host}"',
+    f'connect_token_keychain_service = "{service}"',
+    f'connect_token_keychain_account = "{account}"',
+]
+if m:
+    block = m.group(1)
+    block = re.sub(r'(?m)^\s*#?\s*connect_(host|token_keychain_service|token_keychain_account)\s*=.*$\n?', '', block)
+    if not block.endswith('\n'):
+        block += '\n'
+    block += '\n'.join(new_lines) + '\n'
+    text = text[:m.start(1)] + block + text[m.end(1):]
+else:
+    text += '\n[backend.onepassword]\n' + '\n'.join(new_lines) + '\n'
+
+pathlib.Path(path).write_text(text)
+PYEOF
+    patch_ok=$?
+    if [[ $patch_ok -ne 0 ]]; then
+        echo "Warning: could not auto-update TOML. Edit ${CCSWITCH_CONFIG_FILE} manually:" >&2
+        echo "  [backend] type = \"1password\"" >&2
+        echo "  [backend.onepassword] connect_host = \"${connect_host}\"" >&2
+    fi
+
+    # Reload so subsequent calls see the new config
+    unset OP_CONNECT_HOST OP_CONNECT_TOKEN CCSWITCH_OP_CONNECT_HOST
+    _load_config
+
+    # Verify
+    echo ""
+    echo "Verifying Connect access..."
+    if _op_check; then
+        echo "OK — Connect reachable, token valid."
+        echo ""
+        echo "Vault list:"
+        local op_args
+        _op_fill_args op_args
+        op vault list "${op_args[@]}" --format=json 2>/dev/null | jq -r '.[] | "  " + .name' || true
+    else
+        echo ""
+        echo "Setup stored, but verification failed. Check the URL/token and server reachability." >&2
+        return 1
+    fi
 }
 
 # Push: Push local credentials + sequence.json to 1Password.
@@ -2651,6 +2875,7 @@ show_usage() {
     echo "  --pull                           Pull all credentials + metadata from 1Password"
     echo "  --sync [--quiet]                 Bi-directional sync (newest-expiry wins)"
     echo "  --daemon                         Run sync loop continuously (CCSWITCH_SYNC_INTERVAL, default 300s)"
+    echo "  --setup-op-connect               Configure 1Password Connect (URL + token) — no biometric prompts"
     echo ""
     echo "  --help                           Show this help message"
     echo ""
@@ -2746,6 +2971,9 @@ main() {
             ;;
         --init-config)
             cmd_init_config
+            ;;
+        --setup-op-connect)
+            cmd_setup_op_connect
             ;;
         --push)
             cmd_push
