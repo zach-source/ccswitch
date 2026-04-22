@@ -128,10 +128,12 @@ for path, var in mapping.items():
     export CCSWITCH_VAULT_ADDR CCSWITCH_VAULT_PATH CCSWITCH_VAULT_TOKEN
     export CCSWITCH_SYNC_INTERVAL CCSWITCH_EXPIRY_BUFFER_MINUTES
 
-    # Propagate Connect mode to op CLI env vars that the CLI recognizes natively
+    # Propagate Connect mode to op CLI env vars that the CLI recognizes natively.
+    # Token load failure is non-fatal here — _op_check will surface the error
+    # if and when we actually need to talk to 1Password.
     if [[ -n "$CCSWITCH_OP_CONNECT_HOST" ]]; then
         export OP_CONNECT_HOST="$CCSWITCH_OP_CONNECT_HOST"
-        _op_load_connect_token
+        _op_load_connect_token || true
     fi
 }
 
@@ -410,12 +412,17 @@ _keychain_read() {
 
 _keychain_write() {
     local service="$1" credentials="$2"
-    security add-generic-password -U -s "$service" -a "$USER" -w "$credentials" 2>/dev/null
+    # $USER may be unset in stripped environments (launchd agents, CI, tests);
+    # fall back to `id -un` which always works.
+    local acct="${USER:-$(id -un 2>/dev/null)}"
+    security add-generic-password -U -s "$service" -a "$acct" -w "$credentials" 2>/dev/null
 }
 
 _keychain_delete() {
     local service="$1"
-    security delete-generic-password -s "$service" 2>/dev/null || true
+    # `security delete-generic-password` dumps the deleted item's attributes
+    # on stdout; silence both streams so callers don't get surprise output.
+    security delete-generic-password -s "$service" &>/dev/null || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -450,23 +457,14 @@ _op_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - ${account_label}"
 }
 
-# Build op CLI args array.
-# In Connect mode, --account is forbidden (token is already scoped to a server).
-# In signed-in mode, pass --account if CCSWITCH_OP_ACCOUNT is set.
+# Build op CLI args. Each caller should invoke this then iterate via
+# `while read` into its own array, so we avoid namerefs (bash 4.3+) and
+# keep compatibility with older bash.
+# Connect mode: --account is forbidden (token is scoped to a server).
+# Signed-in mode: pass --account if CCSWITCH_OP_ACCOUNT is set.
 _op_args() {
-    local args=()
     if ! _op_is_connect && [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]]; then
-        args+=(--account "$CCSWITCH_OP_ACCOUNT")
-    fi
-    printf '%s\n' "${args[@]}"
-}
-
-# Helper: populate an array of op args by reference
-_op_fill_args() {
-    local -n _out=$1
-    _out=()
-    if ! _op_is_connect && [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]]; then
-        _out+=(--account "$CCSWITCH_OP_ACCOUNT")
+        printf '%s\n%s\n' "--account" "$CCSWITCH_OP_ACCOUNT"
     fi
 }
 
@@ -476,8 +474,11 @@ _op_read() {
         echo ""
         return
     fi
-    local op_args
-    _op_fill_args op_args
+    local op_args=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && op_args+=("$line")
+    done < <(_op_args)
     op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
 }
 
@@ -487,8 +488,11 @@ _op_write() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    local op_args
-    _op_fill_args op_args
+    local op_args=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && op_args+=("$line")
+    done < <(_op_args)
     if op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
         op item edit "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
     else
@@ -498,11 +502,15 @@ _op_write() {
 
 _op_delete() {
     local item_name="$1"
-    if command -v op &>/dev/null; then
-        local op_args
-        _op_fill_args op_args
-        op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
+    if ! command -v op &>/dev/null; then
+        return 0
     fi
+    local op_args=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && op_args+=("$line")
+    done < <(_op_args)
+    op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1234,8 +1242,11 @@ _op_check() {
         return 1
     fi
 
-    local op_args
-    _op_fill_args op_args
+    local op_args=()
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && op_args+=("$line")
+    done < <(_op_args)
 
     # In Connect mode, make sure we managed to load a token
     if [[ -n "${CCSWITCH_OP_CONNECT_HOST:-}" ]] && [[ -z "${OP_CONNECT_TOKEN:-}" ]]; then
@@ -1504,8 +1515,11 @@ PYEOF
         echo "OK — Connect reachable, token valid."
         echo ""
         echo "Vault list:"
-        local op_args
-        _op_fill_args op_args
+        local op_args=()
+        local line
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && op_args+=("$line")
+        done < <(_op_args)
         op vault list "${op_args[@]}" --format=json 2>/dev/null | jq -r '.[] | "  " + .name' || true
     else
         echo ""
