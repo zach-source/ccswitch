@@ -265,7 +265,9 @@ _op_connect_find_item_id() {
     vault_id=$(_op_connect_vault_id) || return 0
     [[ -z "$vault_id" ]] && return 0
     local encoded id
-    encoded=$(jq -sRr @uri <<<"$title" | tr -d '\n')
+    # `printf %s` avoids the trailing newline that <<< would add, which @uri
+    # would otherwise encode as %0A and bake into the filter expression.
+    encoded=$(printf '%s' "$title" | jq -sRr @uri)
     id=$(_op_connect_api GET "/v1/vaults/${vault_id}/items?filter=title%20eq%20%22${encoded}%22" \
         | jq -r '.[0].id // empty' 2>/dev/null)
     _OP_CONNECT_ITEM_ID_CACHE[$title]="$id"
