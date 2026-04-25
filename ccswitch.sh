@@ -14,6 +14,15 @@ readonly SCHEMA_VERSION=2
 readonly CCSWITCH_CONFIG_FILE_DEFAULT="$HOME/.config/ccswitch/config.toml"
 CCSWITCH_CONFIG_FILE="${CCSWITCH_CONFIG_FILE:-$CCSWITCH_CONFIG_FILE_DEFAULT}"
 
+# Keychain service names for Connect/CF Access secrets. Used in both the load
+# path (_op_load_connect_token) and the setup command (cmd_setup_op_connect)
+# — keep them as constants so renames don't desync silently.
+readonly CCSWITCH_KC_CF_ID_SVC="ccswitch-cf-access-client-id"
+readonly CCSWITCH_KC_CF_SECRET_SVC="ccswitch-cf-access-client-secret"
+
+# Field label used inside 1Password Secure Note items for ccswitch credentials.
+readonly CCSWITCH_OP_CRED_FIELD="credentials"
+
 # Compute stable 8-char hex ID from email (SHA-256 prefix)
 hash_email() {
     local email="$1"
@@ -128,9 +137,12 @@ for path, var in mapping.items():
     export CCSWITCH_VAULT_ADDR CCSWITCH_VAULT_PATH CCSWITCH_VAULT_TOKEN
     export CCSWITCH_SYNC_INTERVAL CCSWITCH_EXPIRY_BUFFER_MINUTES
 
+    # Reset Connect vault-id cache so a reconfigure (cmd_setup_op_connect
+    # calls _load_config after writing TOML) doesn't keep a stale id.
+    _OP_CONNECT_CACHED_VAULT_ID=""
+
     # Propagate Connect mode to op CLI env vars that the CLI recognizes natively.
-    # Token load failure is non-fatal here — _op_check will surface the error
-    # if and when we actually need to talk to 1Password.
+    # Token load failure is non-fatal — _op_check surfaces it on demand.
     if [[ -n "$CCSWITCH_OP_CONNECT_HOST" ]]; then
         export OP_CONNECT_HOST="$CCSWITCH_OP_CONNECT_HOST"
         _op_load_connect_token || true
@@ -160,36 +172,21 @@ _load_secret() {
 #   OP_CONNECT_TOKEN         — X-OP-Token header
 #   CF_ACCESS_CLIENT_ID      — CF-Access-Client-Id header
 #   CF_ACCESS_CLIENT_SECRET  — CF-Access-Client-Secret header
-# Primary token must be present; CF Access pair is optional (endpoints without
-# Cloudflare Access in front don't need them).
+# Primary token must be present; CF Access pair is optional (endpoints
+# without Cloudflare Access in front don't need them).
 _op_load_connect_token() {
-    if [[ -z "${OP_CONNECT_TOKEN:-}" ]]; then
-        local tok
-        tok=$(_load_secret \
-            "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE" \
-            "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT" \
-            "connect-token" 2>/dev/null || true)
-        [[ -n "$tok" ]] && export OP_CONNECT_TOKEN="$tok"
-    fi
-
-    if [[ -z "${CF_ACCESS_CLIENT_ID:-}" ]]; then
-        local cid
-        cid=$(_load_secret \
-            "ccswitch-cf-access-client-id" \
-            "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT" \
-            "cf-access-client-id" 2>/dev/null || true)
-        [[ -n "$cid" ]] && export CF_ACCESS_CLIENT_ID="$cid"
-    fi
-
-    if [[ -z "${CF_ACCESS_CLIENT_SECRET:-}" ]]; then
-        local csec
-        csec=$(_load_secret \
-            "ccswitch-cf-access-client-secret" \
-            "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT" \
-            "cf-access-client-secret" 2>/dev/null || true)
-        [[ -n "$csec" ]] && export CF_ACCESS_CLIENT_SECRET="$csec"
-    fi
-
+    local triple env_var service file val
+    local -a triples=(
+        "OP_CONNECT_TOKEN|${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE}|connect-token"
+        "CF_ACCESS_CLIENT_ID|${CCSWITCH_KC_CF_ID_SVC}|cf-access-client-id"
+        "CF_ACCESS_CLIENT_SECRET|${CCSWITCH_KC_CF_SECRET_SVC}|cf-access-client-secret"
+    )
+    for triple in "${triples[@]}"; do
+        IFS='|' read -r env_var service file <<<"$triple"
+        [[ -n "${!env_var:-}" ]] && continue
+        val=$(_load_secret "$service" "$CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT" "$file" 2>/dev/null || true)
+        [[ -n "$val" ]] && export "$env_var"="$val"
+    done
     [[ -n "${OP_CONNECT_TOKEN:-}" ]]
 }
 
@@ -200,13 +197,9 @@ _op_is_connect() {
 }
 
 # ─── HTTP Connect API helpers ──────────────────────────────────────────────
-# Used when OP_CONNECT_HOST is set. Every request carries X-OP-Token plus the
-# CF Access service-token pair (if CF_ACCESS_CLIENT_ID/SECRET are set). The
-# nginx proxy at the Connect endpoint remaps X-OP-Token → Authorization so
-# the internal Connect server sees a standard Bearer token.
-
-# Append curl header args for the current Connect mode to an array named
-# by the first argument (printf-based so we don't need bash 4.3 namerefs).
+# Some Connect endpoints sit behind Cloudflare Access, which strips
+# Authorization: Bearer. We send the bearer in X-OP-Token (a downstream
+# proxy remaps it) plus the CF Access service-token pair when configured.
 _op_connect_header_args() {
     printf '%s\n' "-H" "X-OP-Token: ${OP_CONNECT_TOKEN}"
     if [[ -n "${CF_ACCESS_CLIENT_ID:-}" ]]; then
@@ -224,10 +217,7 @@ _op_connect_api() {
     local method="$1" path="$2" body="${3:-}"
     local url="${OP_CONNECT_HOST%/}${path}"
     local -a hdrs=()
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && hdrs+=("$line")
-    done < <(_op_connect_header_args)
+    mapfile -t hdrs < <(_op_connect_header_args)
 
     if [[ -n "$body" ]]; then
         curl --fail --silent --show-error \
@@ -256,16 +246,28 @@ _op_connect_vault_id() {
     [[ -n "$_OP_CONNECT_CACHED_VAULT_ID" ]] && printf '%s' "$_OP_CONNECT_CACHED_VAULT_ID"
 }
 
+# Pure-bash percent-encoding for URL query values. Replaces a python3 fork
+# per call; safe for arbitrary titles (spaces, hex hashes, punctuation).
+_url_encode() {
+    local raw="$1" out="" i c
+    for ((i = 0; i < ${#raw}; i++)); do
+        c="${raw:i:1}"
+        case "$c" in
+            [a-zA-Z0-9.~_-]) out+="$c" ;;
+            *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
+        esac
+    done
+    printf '%s' "$out"
+}
+
 # Find an item UUID by title within the configured vault (empty if missing).
-# URL-encode the title so vault names with spaces / titles with hex-hashes
-# survive the filter expression.
 _op_connect_find_item_id() {
     local title="$1"
     local vault_id
     vault_id=$(_op_connect_vault_id) || return 0
     [[ -z "$vault_id" ]] && return 0
     local encoded
-    encoded=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$title" 2>/dev/null)
+    encoded=$(_url_encode "$title")
     _op_connect_api GET "/v1/vaults/${vault_id}/items?filter=title%20eq%20%22${encoded}%22" \
         | jq -r '.[0].id // empty' 2>/dev/null
 }
@@ -279,7 +281,8 @@ _op_connect_read() {
     item_id=$(_op_connect_find_item_id "$title")
     [[ -z "$item_id" ]] && { echo ""; return; }
     _op_connect_api GET "/v1/vaults/${vault_id}/items/${item_id}" \
-        | jq -r '(.fields[]? | select(.label == "credentials") | .value) // empty' 2>/dev/null
+        | jq -r --arg label "$CCSWITCH_OP_CRED_FIELD" \
+            '(.fields[]? | select(.label == $label) | .value) // empty' 2>/dev/null
 }
 
 # Create-or-update a Secure Note item containing a `credentials` field.
@@ -294,20 +297,21 @@ _op_connect_write() {
         --arg title "$title" \
         --arg vault "$vault_id" \
         --arg value "$credentials" \
+        --arg label "$CCSWITCH_OP_CRED_FIELD" \
         '{
             vault: { id: $vault },
             category: "SECURE_NOTE",
             title: $title,
             fields: [
-                { label: "credentials", type: "CONCEALED", value: $value }
+                { label: $label, type: "CONCEALED", value: $value }
             ]
         }')
 
     item_id=$(_op_connect_find_item_id "$title")
     if [[ -n "$item_id" ]]; then
-        _op_connect_api PUT "/v1/vaults/${vault_id}/items/${item_id}" "$body" >/dev/null
+        _op_connect_api PUT "/v1/vaults/${vault_id}/items/${item_id}" "$body" >/dev/null || return 1
     else
-        _op_connect_api POST "/v1/vaults/${vault_id}/items" "$body" >/dev/null
+        _op_connect_api POST "/v1/vaults/${vault_id}/items" "$body" >/dev/null || return 1
     fi
 }
 
@@ -604,35 +608,34 @@ _op_item_name() {
     echo "${CCSWITCH_OP_ITEM_PREFIX} - ${account_label}"
 }
 
-# Build op CLI args. Each caller should invoke this then iterate via
-# `while read` into its own array, so we avoid namerefs (bash 4.3+) and
-# keep compatibility with older bash.
-# Connect mode: --account is forbidden (token is scoped to a server).
-# Signed-in mode: pass --account if CCSWITCH_OP_ACCOUNT is set.
+# Build op CLI args for signed-in mode. In Connect mode --account is
+# forbidden (token is scoped to a server), so this returns nothing.
 _op_args() {
     if ! _op_is_connect && [[ -n "${CCSWITCH_OP_ACCOUNT:-}" ]]; then
         printf '%s\n%s\n' "--account" "$CCSWITCH_OP_ACCOUNT"
     fi
 }
 
+# Populate the global `_op_argv` array with current `_op_args` output.
+# Bash 4+ `mapfile` collapses what was a 4-line read-loop into one call.
+_op_argv=()
+_op_argv_load() {
+    _op_argv=()
+    mapfile -t _op_argv < <(_op_args)
+}
+
 _op_read() {
     local item_name="$1"
-    # Connect mode — go through HTTP (supports CF Access headers).
     if _op_is_connect; then
         _op_connect_read "$item_name"
         return
     fi
-    # Signed-in mode — shell out to op CLI.
     if ! command -v op &>/dev/null; then
         echo ""
         return
     fi
-    local op_args=()
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && op_args+=("$line")
-    done < <(_op_args)
-    op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" --fields label=credentials --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
+    _op_argv_load
+    op item get "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" --fields "label=$CCSWITCH_OP_CRED_FIELD" --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
 }
 
 _op_write() {
@@ -645,15 +648,11 @@ _op_write() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    local op_args=()
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && op_args+=("$line")
-    done < <(_op_args)
-    if op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
-        op item edit "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+    _op_argv_load
+    if op item get "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
+        op item edit "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
     else
-        op item create "${op_args[@]}" --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "credentials=$credentials" &>/dev/null
+        op item create "${_op_argv[@]}" --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
     fi
 }
 
@@ -666,12 +665,8 @@ _op_delete() {
     if ! command -v op &>/dev/null; then
         return 0
     fi
-    local op_args=()
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && op_args+=("$line")
-    done < <(_op_args)
-    op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
+    _op_argv_load
+    op item delete "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1395,16 +1390,15 @@ _op_sequence_item_name() {
 }
 
 # Check that the configured 1Password backend is reachable.
-# Probe uses GET /v1/vaults in Connect mode (curl + all headers),
-# `op vault list` otherwise (non-interactive, no biometric prompt).
+# Probe uses GET /v1/vaults in Connect mode, `op vault list` otherwise.
 _op_check() {
-    # In Connect mode, validate that we loaded a token and can reach the API.
-    if [[ -n "${CCSWITCH_OP_CONNECT_HOST:-}" ]]; then
-        if [[ -z "${OP_CONNECT_TOKEN:-}" ]]; then
-            echo "Error: OP_CONNECT_HOST is configured (${CCSWITCH_OP_CONNECT_HOST}) but no OP_CONNECT_TOKEN found." >&2
-            echo "Run: ccswitch --setup-op-connect" >&2
-            return 1
-        fi
+    if [[ -n "${CCSWITCH_OP_CONNECT_HOST:-}" ]] && [[ -z "${OP_CONNECT_TOKEN:-}" ]]; then
+        echo "Error: OP_CONNECT_HOST is configured (${CCSWITCH_OP_CONNECT_HOST}) but no OP_CONNECT_TOKEN found." >&2
+        echo "Run: ccswitch --setup-op-connect" >&2
+        return 1
+    fi
+
+    if _op_is_connect; then
         if ! command -v curl &>/dev/null; then
             echo "Error: curl not installed — required for Connect mode" >&2
             return 1
@@ -1417,22 +1411,15 @@ _op_check() {
         return 0
     fi
 
-    # Signed-in mode — shell out to op CLI.
     if ! command -v op &>/dev/null; then
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-
-    local op_args=()
-    local line
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && op_args+=("$line")
-    done < <(_op_args)
-
-    if ! op vault list "${op_args[@]}" --format=json &>/dev/null; then
+    _op_argv_load
+    if ! op vault list "${_op_argv[@]}" --format=json &>/dev/null; then
         local target="${CCSWITCH_OP_ACCOUNT:-default account}"
         echo "Error: 1Password CLI not signed in for ${target}." >&2
-        echo "Run: op ${op_args[*]} signin" >&2
+        echo "Run: op ${_op_argv[*]} signin" >&2
         return 1
     fi
     return 0
@@ -1648,8 +1635,8 @@ cmd_setup_op_connect() {
 
     local kc_token_svc="${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_SERVICE}"
     local kc_account="${CCSWITCH_OP_CONNECT_TOKEN_KEYCHAIN_ACCOUNT}"
-    local kc_cf_id_svc="ccswitch-cf-access-client-id"
-    local kc_cf_secret_svc="ccswitch-cf-access-client-secret"
+    local kc_cf_id_svc="$CCSWITCH_KC_CF_ID_SVC"
+    local kc_cf_secret_svc="$CCSWITCH_KC_CF_SECRET_SVC"
 
     if [[ "$choice" == "2" ]]; then
         if ! command -v op &>/dev/null; then
