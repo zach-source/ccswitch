@@ -137,9 +137,11 @@ for path, var in mapping.items():
     export CCSWITCH_VAULT_ADDR CCSWITCH_VAULT_PATH CCSWITCH_VAULT_TOKEN
     export CCSWITCH_SYNC_INTERVAL CCSWITCH_EXPIRY_BUFFER_MINUTES
 
-    # Reset Connect vault-id cache so a reconfigure (cmd_setup_op_connect
-    # calls _load_config after writing TOML) doesn't keep a stale id.
+    # Reset Connect lookup caches on reload so a reconfigure
+    # (cmd_setup_op_connect calls _load_config after writing TOML) doesn't
+    # keep stale ids.
     _OP_CONNECT_CACHED_VAULT_ID=""
+    _OP_CONNECT_ITEM_ID_CACHE=()
 
     # Propagate Connect mode to op CLI env vars that the CLI recognizes natively.
     # Token load failure is non-fatal — _op_check surfaces it on demand.
@@ -246,30 +248,28 @@ _op_connect_vault_id() {
     [[ -n "$_OP_CONNECT_CACHED_VAULT_ID" ]] && printf '%s' "$_OP_CONNECT_CACHED_VAULT_ID"
 }
 
-# Pure-bash percent-encoding for URL query values. Replaces a python3 fork
-# per call; safe for arbitrary titles (spaces, hex hashes, punctuation).
-_url_encode() {
-    local raw="$1" out="" i c
-    for ((i = 0; i < ${#raw}; i++)); do
-        c="${raw:i:1}"
-        case "$c" in
-            [a-zA-Z0-9.~_-]) out+="$c" ;;
-            *) printf -v c '%%%02X' "'$c"; out+="$c" ;;
-        esac
-    done
-    printf '%s' "$out"
-}
+# Cache title → item UUID resolutions for the script lifetime so a write that
+# follows a read of the same item doesn't re-issue the GET-by-title lookup.
+declare -gA _OP_CONNECT_ITEM_ID_CACHE=()
 
 # Find an item UUID by title within the configured vault (empty if missing).
+# Title is URI-encoded via jq's @uri (jq is already a hard dependency).
+# Result cached so a write-after-read on the same title skips the GET.
 _op_connect_find_item_id() {
     local title="$1"
+    if [[ -n "${_OP_CONNECT_ITEM_ID_CACHE[$title]+set}" ]]; then
+        printf '%s' "${_OP_CONNECT_ITEM_ID_CACHE[$title]}"
+        return 0
+    fi
     local vault_id
     vault_id=$(_op_connect_vault_id) || return 0
     [[ -z "$vault_id" ]] && return 0
-    local encoded
-    encoded=$(_url_encode "$title")
-    _op_connect_api GET "/v1/vaults/${vault_id}/items?filter=title%20eq%20%22${encoded}%22" \
-        | jq -r '.[0].id // empty' 2>/dev/null
+    local encoded id
+    encoded=$(jq -sRr @uri <<<"$title" | tr -d '\n')
+    id=$(_op_connect_api GET "/v1/vaults/${vault_id}/items?filter=title%20eq%20%22${encoded}%22" \
+        | jq -r '.[0].id // empty' 2>/dev/null)
+    _OP_CONNECT_ITEM_ID_CACHE[$title]="$id"
+    printf '%s' "$id"
 }
 
 # Read the `credentials` field of an item by title. Empty on miss.
@@ -311,7 +311,11 @@ _op_connect_write() {
     if [[ -n "$item_id" ]]; then
         _op_connect_api PUT "/v1/vaults/${vault_id}/items/${item_id}" "$body" >/dev/null || return 1
     else
-        _op_connect_api POST "/v1/vaults/${vault_id}/items" "$body" >/dev/null || return 1
+        local created_id
+        created_id=$(_op_connect_api POST "/v1/vaults/${vault_id}/items" "$body" \
+            | jq -r '.id // empty' 2>/dev/null) || return 1
+        # Keep the title→id cache fresh so a subsequent write doesn't re-find.
+        [[ -n "$created_id" ]] && _OP_CONNECT_ITEM_ID_CACHE[$title]="$created_id"
     fi
 }
 
@@ -324,6 +328,7 @@ _op_connect_delete() {
     item_id=$(_op_connect_find_item_id "$title")
     [[ -z "$item_id" ]] && return 0
     _op_connect_api DELETE "/v1/vaults/${vault_id}/items/${item_id}" >/dev/null || true
+    unset "_OP_CONNECT_ITEM_ID_CACHE[$title]"
 }
 
 # Load config immediately so all subsequent code sees resolved values
@@ -616,14 +621,6 @@ _op_args() {
     fi
 }
 
-# Populate the global `_op_argv` array with current `_op_args` output.
-# Bash 4+ `mapfile` collapses what was a 4-line read-loop into one call.
-_op_argv=()
-_op_argv_load() {
-    _op_argv=()
-    mapfile -t _op_argv < <(_op_args)
-}
-
 _op_read() {
     local item_name="$1"
     if _op_is_connect; then
@@ -634,8 +631,8 @@ _op_read() {
         echo ""
         return
     fi
-    _op_argv_load
-    op item get "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" --fields "label=$CCSWITCH_OP_CRED_FIELD" --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
+    local -a op_args; mapfile -t op_args < <(_op_args)
+    op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" --fields "label=$CCSWITCH_OP_CRED_FIELD" --format json 2>/dev/null | jq -r '.value // empty' 2>/dev/null || echo ""
 }
 
 _op_write() {
@@ -648,11 +645,11 @@ _op_write() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    _op_argv_load
-    if op item get "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
-        op item edit "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
+    local -a op_args; mapfile -t op_args < <(_op_args)
+    if op item get "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1; then
+        op item edit "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
     else
-        op item create "${_op_argv[@]}" --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
+        op item create "${op_args[@]}" --category "Secure Note" --title "$item_name" --vault "$CCSWITCH_OP_VAULT" "${CCSWITCH_OP_CRED_FIELD}=$credentials" &>/dev/null
     fi
 }
 
@@ -665,8 +662,8 @@ _op_delete() {
     if ! command -v op &>/dev/null; then
         return 0
     fi
-    _op_argv_load
-    op item delete "$item_name" "${_op_argv[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
+    local -a op_args; mapfile -t op_args < <(_op_args)
+    op item delete "$item_name" "${op_args[@]}" --vault "$CCSWITCH_OP_VAULT" &>/dev/null 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -802,17 +799,13 @@ delete_account_credentials() {
 
 readonly OAUTH_SCOPES="user:profile user:inference user:sessions:claude_code"
 
-# Check if a credential JSON blob has an expired access token
+# Check if a credential JSON blob has an expired access token (within 5 min).
 _token_is_expired() {
     local cred_json="$1"
-    python3 -c "
-import sys, json, time
-d = json.loads('''$cred_json''')
-expires = d.get('claudeAiOauth', {}).get('expiresAt', 0)
-now_ms = int(time.time() * 1000)
-# Consider expired if less than 5 minutes remaining
-sys.exit(0 if expires < (now_ms + 300000) else 1)
-" 2>/dev/null
+    local exp_ms now_ms
+    exp_ms=$(_cred_expires_ms "$cred_json")
+    now_ms=$(awk 'BEGIN { printf "%d", systime() * 1000 }')
+    [[ "$exp_ms" -lt $((now_ms + 300000)) ]]
 }
 
 # Refresh credentials using `claude auth login` with the refresh token env var.
@@ -823,7 +816,7 @@ _refresh_via_claude_auth() {
     local cred_json="$1"
 
     local refresh_token
-    refresh_token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('refreshToken',''))" 2>/dev/null)
+    refresh_token=$(_cred_field "$cred_json" refreshToken)
 
     if [[ -z "$refresh_token" ]]; then
         echo "no refresh token" >&2
@@ -961,13 +954,7 @@ cmd_save() {
     write_account_config "$target_id" "$target_email" "$config_content"
 
     local expires_h
-    expires_h=$(echo "$creds" | python3 -c "
-import sys, json, time
-d = json.loads(sys.stdin.read())
-exp = d.get('claudeAiOauth', {}).get('expiresAt', 0)
-h = (exp - time.time() * 1000) / 3600000
-print(f'{h:.1f}')
-" 2>/dev/null)
+    expires_h=$(_cred_hours_left "$(_cred_expires_ms "$creds")")
 
     echo "Saved credentials for ${target_id} (${target_email}, expires in ${expires_h}h)"
 }
@@ -1132,12 +1119,7 @@ cmd_refresh_all() {
         if [[ -n "$active_creds" ]]; then
             write_account_credentials "$active_id" "$active_email" "$active_creds"
             local hours_left
-            hours_left=$(echo "$active_creds" | python3 -c "
-import sys, json, time
-d = json.loads(sys.stdin.read())
-exp = d.get('claudeAiOauth', {}).get('expiresAt', 0)
-print(f'{(exp - time.time() * 1000) / 3600000:.1f}')
-" 2>/dev/null)
+            hours_left=$(_cred_hours_left "$(_cred_expires_ms "$active_creds")")
             echo "synced to backup (${hours_left}h remaining)"
         else
             echo "no active credentials"
@@ -1162,12 +1144,7 @@ print(f'{(exp - time.time() * 1000) / 3600000:.1f}')
 
         if ! _token_is_expired "$cred_json"; then
             local hours_left
-            hours_left=$(echo "$cred_json" | python3 -c "
-import sys, json, time
-d = json.loads(sys.stdin.read())
-exp = d.get('claudeAiOauth', {}).get('expiresAt', 0)
-print(f'{(exp - time.time() * 1000) / 3600000:.1f}')
-" 2>/dev/null)
+            hours_left=$(_cred_hours_left "$(_cred_expires_ms "$cred_json")")
             echo "valid (${hours_left}h remaining)"
             continue
         fi
@@ -1415,28 +1392,36 @@ _op_check() {
         echo "Error: 1password-cli (op) not installed" >&2
         return 1
     fi
-    _op_argv_load
-    if ! op vault list "${_op_argv[@]}" --format=json &>/dev/null; then
+    local -a op_args; mapfile -t op_args < <(_op_args)
+    if ! op vault list "${op_args[@]}" --format=json &>/dev/null; then
         local target="${CCSWITCH_OP_ACCOUNT:-default account}"
         echo "Error: 1Password CLI not signed in for ${target}." >&2
-        echo "Run: op ${_op_argv[*]} signin" >&2
+        echo "Run: op ${op_args[*]} signin" >&2
         return 1
     fi
     return 0
 }
 
-# Extract expiresAt from a credential JSON blob (in ms), 0 if missing
+# Extract a string field from `.claudeAiOauth` of a credential JSON blob.
+# Empty if blob is empty, malformed, or field is missing.
+_cred_field() {
+    local cred_json="$1" key="$2"
+    [[ -z "$cred_json" ]] && return 0
+    jq -r --arg k "$key" '(.claudeAiOauth[$k] // empty)' <<<"$cred_json" 2>/dev/null
+}
+
+# Extract expiresAt (ms since epoch) from a credential JSON blob, 0 if missing.
 _cred_expires_ms() {
     local cred_json="$1"
     [[ -z "$cred_json" ]] && { echo "0"; return; }
-    echo "$cred_json" | python3 -c "
-import sys, json
-try:
-    d = json.loads(sys.stdin.read())
-    print(d.get('claudeAiOauth', {}).get('expiresAt', 0))
-except:
-    print(0)
-" 2>/dev/null
+    jq -r '(.claudeAiOauth.expiresAt // 0)' <<<"$cred_json" 2>/dev/null || echo 0
+}
+
+# Hours from now until the credential expires (one decimal place). Uses awk
+# so we don't fork python just for a clock subtract.
+_cred_hours_left() {
+    local exp_ms="$1"
+    awk -v exp="$exp_ms" 'BEGIN { printf "%.1f", (exp - systime()*1000) / 3600000 }'
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1659,46 +1644,45 @@ cmd_setup_op_connect() {
             ref_csec="${ref_csec:-op://Personal Agents/op-connect-cf-access/client_secret}"
         fi
 
-        # Pipe `op read` output straight into _store_secret via stdin — values
-        # never land in shell variables or command args.
-        echo "Storing Connect bearer token..."
-        if ! op read "${acct_args[@]}" "$ref_tok" \
-             | _store_secret "$kc_token_svc" "$kc_account" "connect-token"; then
-            echo "Error: failed to read or store Connect bearer token" >&2
-            return 1
-        fi
-        if [[ $want_cf -eq 1 ]]; then
-            echo "Storing CF Access client id..."
-            if ! op read "${acct_args[@]}" "$ref_cid" \
-                 | _store_secret "$kc_cf_id_svc" "$kc_account" "cf-access-client-id"; then
-                echo "Error: failed to read or store CF Access client id" >&2
+        # Drive the three secrets from a single tuple list. Each entry:
+        #   label|svc|file|ref|required(0|1 — 1 means always, else CF-only)
+        # Pipe `op read` output straight into _store_secret via stdin so
+        # values never land in shell variables or command args.
+        local row label svc file ref required
+        local -a secrets=(
+            "Connect bearer token|$kc_token_svc|connect-token|$ref_tok|1"
+            "CF Access client id|$kc_cf_id_svc|cf-access-client-id|$ref_cid|0"
+            "CF Access client secret|$kc_cf_secret_svc|cf-access-client-secret|$ref_csec|0"
+        )
+        for row in "${secrets[@]}"; do
+            IFS='|' read -r label svc file ref required <<<"$row"
+            [[ "$required" == "0" && $want_cf -eq 0 ]] && continue
+            echo "Storing ${label}..."
+            if ! op read "${acct_args[@]}" "$ref" \
+                 | _store_secret "$svc" "$kc_account" "$file"; then
+                echo "Error: failed to read or store ${label}" >&2
                 return 1
             fi
-            echo "Storing CF Access client secret..."
-            if ! op read "${acct_args[@]}" "$ref_csec" \
-                 | _store_secret "$kc_cf_secret_svc" "$kc_account" "cf-access-client-secret"; then
-                echo "Error: failed to read or store CF Access client secret" >&2
-                return 1
-            fi
-        fi
+        done
     else
-        # Manual entry — hidden prompts
-        local tmp=""
-        read -r -s -p "Connect bearer token (hidden): " tmp; echo
-        if ! printf '%s' "$tmp" | _store_secret "$kc_token_svc" "$kc_account" "connect-token"; then
-            echo "Error: failed to store bearer token" >&2
-            return 1
-        fi
-        unset tmp
-
-        if [[ $want_cf -eq 1 ]]; then
-            read -r -s -p "CF Access client id (hidden): " tmp; echo
-            printf '%s' "$tmp" | _store_secret "$kc_cf_id_svc" "$kc_account" "cf-access-client-id" || return 1
+        # Manual entry — hidden prompts. Same tuple shape minus the op:// ref.
+        local row label svc file required tmp=""
+        local -a secrets=(
+            "Connect bearer token|$kc_token_svc|connect-token|1"
+            "CF Access client id|$kc_cf_id_svc|cf-access-client-id|0"
+            "CF Access client secret|$kc_cf_secret_svc|cf-access-client-secret|0"
+        )
+        for row in "${secrets[@]}"; do
+            IFS='|' read -r label svc file required <<<"$row"
+            [[ "$required" == "0" && $want_cf -eq 0 ]] && continue
+            read -r -s -p "${label} (hidden): " tmp; echo
+            if ! printf '%s' "$tmp" | _store_secret "$svc" "$kc_account" "$file"; then
+                echo "Error: failed to store ${label}" >&2
+                unset tmp
+                return 1
+            fi
             unset tmp
-            read -r -s -p "CF Access client secret (hidden): " tmp; echo
-            printf '%s' "$tmp" | _store_secret "$kc_cf_secret_svc" "$kc_account" "cf-access-client-secret" || return 1
-            unset tmp
-        fi
+        done
     fi
 
     echo "Secrets stored."
@@ -1805,7 +1789,7 @@ cmd_push() {
             local exp_ms
             exp_ms=$(_cred_expires_ms "$cred_json")
             local hours
-            hours=$(python3 -c "import time; print(f'{($exp_ms - time.time()*1000)/3600000:.1f}')" 2>/dev/null)
+            hours=$(_cred_hours_left "$exp_ms")
             echo "  ${id} ${email}: pushed (expires in ${hours}h)"
             pushed=$((pushed + 1))
         else
@@ -1888,7 +1872,7 @@ cmd_pull() {
 
         local exp_ms hours
         exp_ms=$(_cred_expires_ms "$remote_cred")
-        hours=$(python3 -c "import time; print(f'{($exp_ms - time.time()*1000)/3600000:.1f}')" 2>/dev/null)
+        hours=$(_cred_hours_left "$exp_ms")
         echo "  ${id} ${email}: pulled (expires in ${hours}h)"
         pulled=$((pulled + 1))
     done
@@ -2777,8 +2761,8 @@ cmd_usage_all() {
             fi
         fi
         if [[ -n "$cred_json" ]]; then
-            token=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('accessToken',''))" 2>/dev/null)
-            sub_type=$(echo "$cred_json" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('claudeAiOauth',{}).get('subscriptionType',''))" 2>/dev/null)
+            token=$(_cred_field "$cred_json" accessToken)
+            sub_type=$(_cred_field "$cred_json" subscriptionType)
         fi
 
         if [[ -z "$token" ]]; then
