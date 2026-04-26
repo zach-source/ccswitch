@@ -202,13 +202,20 @@ _op_is_connect() {
 # Some Connect endpoints sit behind Cloudflare Access, which strips
 # Authorization: Bearer. We send the bearer in X-OP-Token (a downstream
 # proxy remaps it) plus the CF Access service-token pair when configured.
-_op_connect_header_args() {
-    printf '%s\n' "-H" "X-OP-Token: ${OP_CONNECT_TOKEN}"
+#
+# Secrets are passed to curl through a config file fed via process
+# substitution (`-K <(...)`) — never as -H argv — so neither the bearer
+# token nor the CF Access client-secret appears in `ps -ef` for any
+# same-UID observer. JSON request bodies likewise come in over stdin
+# (`--data-binary @-`) instead of `--data "$body"` so credential blobs
+# never transit through the curl process arg list either.
+_op_connect_curl_config() {
+    printf 'header = "X-OP-Token: %s"\n' "$OP_CONNECT_TOKEN"
     if [[ -n "${CF_ACCESS_CLIENT_ID:-}" ]]; then
-        printf '%s\n' "-H" "CF-Access-Client-Id: ${CF_ACCESS_CLIENT_ID}"
+        printf 'header = "CF-Access-Client-Id: %s"\n' "$CF_ACCESS_CLIENT_ID"
     fi
     if [[ -n "${CF_ACCESS_CLIENT_SECRET:-}" ]]; then
-        printf '%s\n' "-H" "CF-Access-Client-Secret: ${CF_ACCESS_CLIENT_SECRET}"
+        printf 'header = "CF-Access-Client-Secret: %s"\n' "$CF_ACCESS_CLIENT_SECRET"
     fi
 }
 
@@ -218,21 +225,22 @@ _op_connect_header_args() {
 _op_connect_api() {
     local method="$1" path="$2" body="${3:-}"
     local url="${OP_CONNECT_HOST%/}${path}"
-    local -a hdrs=()
-    mapfile -t hdrs < <(_op_connect_header_args)
 
     if [[ -n "$body" ]]; then
         curl --fail --silent --show-error \
-            "${hdrs[@]}" \
+            -K <(_op_connect_curl_config) \
             -H "Content-Type: application/json" \
             -X "$method" \
-            --data "$body" \
-            "$url" 2>/dev/null
+            --data-binary @- \
+            "$url" \
+            <<<"$body" \
+            2>/dev/null
     else
         curl --fail --silent --show-error \
-            "${hdrs[@]}" \
+            -K <(_op_connect_curl_config) \
             -X "$method" \
-            "$url" 2>/dev/null
+            "$url" \
+            2>/dev/null
     fi
 }
 
@@ -570,9 +578,14 @@ _keychain_read() {
 
 _keychain_write() {
     local service="$1" credentials="$2"
-    # $USER may be unset in stripped environments (launchd agents, CI, tests);
-    # fall back to `id -un` which always works.
+    # $USER may be unset in stripped envs (launchd agents, CI, tests).
     local acct="${USER:-$(id -un 2>/dev/null)}"
+    # Apple's `security add-generic-password` has no scriptable stdin-password
+    # mode (bare `-w` triggers an interactive double-prompt with retype
+    # confirmation, unusable from non-interactive contexts). The credential
+    # therefore briefly appears in the security process's argv. Mitigated by
+    # macOS UID-isolated argv visibility; eliminated only by linking against
+    # Security.framework directly. See docs/SECURITY.md.
     security add-generic-password -U -s "$service" -a "$acct" -w "$credentials" 2>/dev/null
 }
 
@@ -1547,9 +1560,13 @@ EOF
 # (or ~/.config/ccswitch/connect-token on Linux), writes/updates TOML config,
 # and verifies by listing the vault.
 # Store a secret in macOS Keychain (preferred) or a 0600 file fallback.
+# Reads the value from stdin so it never lands in this process's argv.
 # `-T /usr/bin/security` whitelists the security CLI so the launchd daemon
-# can read without prompting. Reads the value from stdin so it never lands
-# in shell history or the process arg list.
+# can read without prompting.
+#
+# Caveat: the value still briefly appears in the `security` subprocess's
+# argv via `-w VALUE`; Apple's CLI offers no stdin alternative. Same-UID
+# argv exposure only — see docs/SECURITY.md.
 #   _store_secret <keychain_service> <keychain_account> <file_basename>
 _store_secret() {
     local service="$1" account="$2" file="$3"
