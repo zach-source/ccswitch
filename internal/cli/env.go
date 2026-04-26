@@ -104,10 +104,9 @@ func newEnvCmd() *cobra.Command {
 			activeID := seq.ActiveAccountID
 			var credsData []byte
 			if id == activeID {
-				credsData, err = b.Read(ctx, "Claude Code-credentials")
+				credsData, err = b.Read(ctx, account.ActiveCredKey)
 			} else {
-				key := fmt.Sprintf("Claude Code Account - %s-%s", id, acct.Email)
-				credsData, err = b.Read(ctx, key)
+				credsData, err = b.Read(ctx, account.BackupCredKey(id, acct.Email))
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "echo 'Error: No credentials found for %s (%s)'\n", id, acct.Email)

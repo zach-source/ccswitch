@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
+	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/config"
 )
 
@@ -137,6 +139,19 @@ func pickWithPrompt(ids []string, lines []string) (string, error) {
 // performSwitch activates the target account: copies the target's backup
 // credentials into the active slot of the local backend, updates
 // sequence.json, and prints the post-switch instructions.
+//
+// Order of operations is chosen to be recovery-safe:
+//  1. Read target's backup creds (fail fast if missing).
+//  2. Snapshot the prior active account's creds into its backup slot.
+//  3. Save sequence.json (so a crash here leaves keychain inconsistent
+//     with sequence.json — but sequence.json is the cheap thing to fix).
+//  4. Write target's creds into the active slot.
+//
+// If step 4 crashes, sequence.json points to the new account but the
+// active slot still has the old one — `ccswitch save` recovers.
+// Doing step 4 before step 3 would leave the user with new creds in the
+// active slot but sequence.json still naming the prior account, which
+// is the harder direction to detect.
 func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence, targetID string) error {
 	acct, ok := seq.Accounts[targetID]
 	if !ok {
@@ -152,25 +167,31 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 
 	ctx := cmd.Context()
 
-	// Save the currently-active account's creds into its own backup slot
-	// before overwriting the active slot — preserves "save before switch".
+	// 1. Read target's backup creds; surface ErrNotFound with a useful hint.
+	targetData, err := local.Read(ctx, account.BackupCredKey(targetID, acct.Email))
+	if err != nil {
+		if errors.Is(err, backend.ErrNotFound) {
+			return fmt.Errorf("no stored credentials for %s (%s); run `ccswitch login %s` first",
+				targetID, acct.Email, targetID)
+		}
+		return fmt.Errorf("read target creds: %w", err)
+	}
+
+	// 2. Snapshot prior active into its backup slot (best-effort).
 	if seq.ActiveAccountID != "" && seq.ActiveAccountID != targetID {
 		if cur, ok := seq.Accounts[seq.ActiveAccountID]; ok {
-			if data, err := local.Read(ctx, account.ActiveCredKey); err == nil && len(data) > 0 {
-				_ = local.Write(ctx, account.BackupCredKey(seq.ActiveAccountID, cur.Email), data)
+			data, rerr := local.Read(ctx, account.ActiveCredKey)
+			if rerr == nil && len(data) > 0 {
+				if werr := local.Write(ctx, account.BackupCredKey(seq.ActiveAccountID, cur.Email), data); werr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
+				}
+			} else if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {
+				fmt.Fprintf(os.Stderr, "Warning: could not read prior active creds: %v\n", rerr)
 			}
 		}
 	}
 
-	// Copy the target account's backup creds into the active slot.
-	data, err := local.Read(ctx, account.BackupCredKey(targetID, acct.Email))
-	if err != nil {
-		return fmt.Errorf("read target creds: %w", err)
-	}
-	if err := local.Write(ctx, account.ActiveCredKey, data); err != nil {
-		return fmt.Errorf("write active slot: %w", err)
-	}
-
+	// 3. Save sequence.json before mutating the active slot.
 	seq.ActiveAccountID = targetID
 	seq.SwitchLog = append(seq.SwitchLog, account.SwitchLogEntry{
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
@@ -178,6 +199,11 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	})
 	if err := seq.Save(sequencePath()); err != nil {
 		return fmt.Errorf("save sequence: %w", err)
+	}
+
+	// 4. Write target into active slot.
+	if err := local.Write(ctx, account.ActiveCredKey, targetData); err != nil {
+		return fmt.Errorf("write active slot: %w", err)
 	}
 
 	fmt.Printf("Switched to %s (%s)\n", targetID, acct.Email)

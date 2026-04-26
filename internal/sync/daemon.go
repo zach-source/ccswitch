@@ -15,10 +15,20 @@ type Daemon struct {
 	log      *slog.Logger
 }
 
-// NewDaemon constructs a Daemon. interval must be positive.
+// DefaultInterval is used when NewDaemon is called with a non-positive
+// interval (config default also picks this; the guard here protects
+// against a hand-edited TOML with `interval = 0` which would otherwise
+// panic time.NewTicker).
+const DefaultInterval = 5 * time.Minute
+
+// NewDaemon constructs a Daemon. A non-positive interval is replaced
+// with DefaultInterval so time.NewTicker doesn't panic.
 func NewDaemon(engine *Engine, interval time.Duration, log *slog.Logger) *Daemon {
 	if log == nil {
 		log = slog.Default()
+	}
+	if interval <= 0 {
+		interval = DefaultInterval
 	}
 	return &Daemon{engine: engine, interval: interval, log: log}
 }

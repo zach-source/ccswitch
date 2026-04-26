@@ -25,8 +25,6 @@ func makeSeq(ids ...string) *account.Sequence {
 		seq.Accounts[id] = account.Account{Email: email}
 		seq.Sequence = append(seq.Sequence, id)
 	}
-	// Tests exercise the per-account backup-slot path; leaving ActiveAccountID
-	// empty keeps the engine from special-casing the active slot.
 	return seq
 }
 
@@ -255,4 +253,46 @@ func abs(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// TestSync_ActiveSlot_PullMirrorsBoth verifies that when a remote-only
+// credential is pulled for the active account, BOTH the active slot
+// (account.ActiveCredKey) and the per-account backup slot are written
+// on local. Otherwise a subsequent switch-away would copy stale backup
+// data over the freshly-pulled active slot, silently losing the token.
+func TestSync_ActiveSlot_PullMirrorsBoth(t *testing.T) {
+	local := inmem.New()
+	remote := inmem.New()
+
+	id, email := "active11", "active11@example.com"
+	seq := makeSeq(id)
+	seq.ActiveAccountID = id
+
+	exp := time.Now().Add(2 * time.Hour).UnixMilli()
+	writeCred(t, remote, id, email, exp)
+
+	e := newEngine(local, remote, seq)
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Active slot must contain the pulled cred.
+	activeData, err := local.Read(context.Background(), account.ActiveCredKey)
+	if err != nil {
+		t.Fatalf("read active slot: %v", err)
+	}
+	activeCred, err := credentials.Parse(activeData)
+	if err != nil {
+		t.Fatalf("parse active cred: %v", err)
+	}
+	if activeCred.ClaudeAIOAuth.ExpiresAtMillis != exp {
+		t.Errorf("active slot expiresAt: want %d got %d", exp, activeCred.ClaudeAIOAuth.ExpiresAtMillis)
+	}
+
+	// Backup slot must also contain the pulled cred (this is the recovery
+	// path for the next switch-away).
+	backupCred := readCred(t, local, id, email)
+	if backupCred.ClaudeAIOAuth.ExpiresAtMillis != exp {
+		t.Errorf("backup slot expiresAt: want %d got %d", exp, backupCred.ClaudeAIOAuth.ExpiresAtMillis)
+	}
 }

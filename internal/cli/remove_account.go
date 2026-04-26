@@ -57,7 +57,7 @@ func newRemoveAccountCmd() *cobra.Command {
 			// Delete credentials from the configured backend.
 			b, backendErr := resolveBackend(cfg)
 			if backendErr == nil {
-				key := fmt.Sprintf("Claude Code Account - %s-%s", id, acct.Email)
+				key := account.BackupCredKey(id, acct.Email)
 				if delErr := b.Delete(context.Background(), key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not delete backend credentials: %v\n", delErr)
 				}

@@ -61,6 +61,10 @@ func New(local, remote backend.Backend, seq *account.Sequence, opts Options) *En
 	}
 }
 
+// Sequence returns the engine's in-memory sequence pointer. Useful for
+// callers that want to persist after Pull/Run mutates it.
+func (e *Engine) Sequence() *account.Sequence { return e.seq }
+
 // Run performs one full bi-directional sync pass.
 func (e *Engine) Run(ctx context.Context) (Result, error) {
 	var res Result
@@ -80,8 +84,7 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 		if !ok {
 			continue
 		}
-		isActive := id == e.seq.ActiveAccountID
-		cr, err := e.syncAccount(ctx, id, acct.Email, isActive)
+		cr, err := e.syncAccount(ctx, id, acct.Email)
 		if err != nil {
 			e.log.Error("sync: account failed", "id", id, "email", acct.Email, "err", err)
 			res.Errors++
@@ -254,8 +257,9 @@ func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 // (account.ActiveCredKey) and pulls write through to BOTH the active slot
 // and the per-account backup slot. Non-active accounts use only the backup
 // slot. Remote always uses the per-account backup slot.
-func (e *Engine) syncAccount(ctx context.Context, id, email string, isActive bool) (Result, error) {
+func (e *Engine) syncAccount(ctx context.Context, id, email string) (Result, error) {
 	var res Result
+	isActive := id == e.seq.ActiveAccountID
 	remoteKey := account.BackupCredKey(id, email)
 	localKey := remoteKey
 	if isActive {
@@ -275,18 +279,19 @@ func (e *Engine) syncAccount(ctx context.Context, id, email string, isActive boo
 		return res, fmt.Errorf("read remote cred %s: %w", id, remoteErr)
 	}
 
+	// writePulled mirrors a freshly-pulled credential into local. For the
+	// active account we update the backup slot FIRST so a failure on the
+	// active-slot write leaves the backup correct; the next switch-away
+	// can then recover. The reverse order would silently lose the new
+	// token: a subsequent switch-away would overwrite the active slot
+	// from the still-stale backup.
 	writePulled := func(data []byte) error {
-		if err := e.local.Write(ctx, localKey, data); err != nil {
-			return err
-		}
 		if isActive {
-			// Also mirror into the per-account backup slot so a subsequent
-			// switch-away preserves the freshly pulled credential.
 			if err := e.local.Write(ctx, remoteKey, data); err != nil {
 				return err
 			}
 		}
-		return nil
+		return e.local.Write(ctx, localKey, data)
 	}
 
 	switch {

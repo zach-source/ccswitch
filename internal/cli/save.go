@@ -51,7 +51,7 @@ func newSaveCmd() *cobra.Command {
 			}
 
 			ctx := context.Background()
-			credsData, err := b.Read(ctx, "Claude Code-credentials")
+			credsData, err := b.Read(ctx, account.ActiveCredKey)
 			if err != nil {
 				return fmt.Errorf("read active credentials: %w", err)
 			}
@@ -61,8 +61,7 @@ func newSaveCmd() *cobra.Command {
 				return fmt.Errorf("parse credentials: %w", err)
 			}
 
-			// Write backup.
-			backupKey := fmt.Sprintf("Claude Code Account - %s-%s", seq.ActiveAccountID, activeAcct.Email)
+			backupKey := account.BackupCredKey(seq.ActiveAccountID, activeAcct.Email)
 			if err := b.Write(ctx, backupKey, credsData); err != nil {
 				return fmt.Errorf("write backup credentials: %w", err)
 			}

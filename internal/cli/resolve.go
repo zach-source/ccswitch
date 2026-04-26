@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/backend/file"
@@ -21,11 +20,7 @@ import (
 func resolveBackend(cfg *config.Config) (backend.Backend, error) {
 	typ := cfg.Backend
 	if typ == backend.TypeAuto {
-		if runtime.GOOS == "darwin" {
-			typ = backend.TypeKeychain
-		} else {
-			typ = backend.TypeFile
-		}
+		typ = autoLocalBackend()
 	}
 	switch typ {
 	case backend.TypeFile:
@@ -100,10 +95,7 @@ func resolvedBackendName(cfg *config.Config) string {
 	if cfg.Backend != backend.TypeAuto {
 		return string(cfg.Backend)
 	}
-	if runtime.GOOS == "darwin" {
-		return string(backend.TypeKeychain)
-	}
-	return string(backend.TypeFile)
+	return string(autoLocalBackend())
 }
 
 // backupDir returns the canonical path for ccswitch state files.
