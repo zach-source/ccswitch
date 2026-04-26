@@ -25,14 +25,13 @@ func makeSeq(ids ...string) *account.Sequence {
 		seq.Accounts[id] = account.Account{Email: email}
 		seq.Sequence = append(seq.Sequence, id)
 	}
-	if len(seq.Sequence) > 0 {
-		seq.ActiveAccountID = seq.Sequence[0]
-	}
+	// Tests exercise the per-account backup-slot path; leaving ActiveAccountID
+	// empty keeps the engine from special-casing the active slot.
 	return seq
 }
 
 func credKey(id, email string) string {
-	return "ccswitch - " + id + "-" + email
+	return account.BackupCredKey(id, email)
 }
 
 func writeCred(t *testing.T, b backend.Backend, id, email string, expiresAtMillis int64) {
@@ -107,7 +106,7 @@ func TestPull_RemoteOnly(t *testing.T) {
 
 	// Write a remote sequence so Pull can read it.
 	seqData, _ := account.MarshalSequence(seq, true)
-	if err := remote.Write(context.Background(), "ccswitch - _sequence", seqData); err != nil {
+	if err := remote.Write(context.Background(), account.SequenceKey, seqData); err != nil {
 		t.Fatal(err)
 	}
 
@@ -197,7 +196,7 @@ func TestSync_Noop(t *testing.T) {
 	seqData, _ := account.MarshalSequence(seq, true)
 	seq.LastUpdated = "2024-01-01T00:00:00Z" // set before writing remote
 	seqData, _ = account.MarshalSequence(seq, true)
-	if err := remote.Write(context.Background(), "ccswitch - _sequence", seqData); err != nil {
+	if err := remote.Write(context.Background(), account.SequenceKey, seqData); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +231,7 @@ func TestSync_SequenceMerge(t *testing.T) {
 	remoteSeq.LastUpdated = "2024-06-01T00:00:00Z"
 	remoteSeq.SwitchLog = nil // remote never has switchLog
 	remoteData, _ := account.MarshalSequence(remoteSeq, false)
-	if err := remote.Write(context.Background(), "ccswitch - _sequence", remoteData); err != nil {
+	if err := remote.Write(context.Background(), account.SequenceKey, remoteData); err != nil {
 		t.Fatal(err)
 	}
 

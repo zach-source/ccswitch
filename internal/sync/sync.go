@@ -1,9 +1,9 @@
 // Package sync implements bi-directional credential synchronisation between a
 // local Backend (file/keychain) and a remote Backend (1Password/Vault).
 //
-// Conflict resolution mirrors cmd_sync in ccswitch.sh:
-//   - For credentials: newer expiresAt wins.
-//   - For sequence metadata: newer lastUpdated wins; local switchLog is always preserved.
+// Conflict resolution:
+//   - Credentials: newer expiresAt wins.
+//   - Sequence metadata: newer lastUpdated wins; local switchLog is preserved.
 //   - Local-only → push. Remote-only → pull.
 package sync
 
@@ -18,14 +18,6 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/credentials"
 )
-
-// sequenceKey is the remote key used to store sequence metadata.
-const sequenceKey = "ccswitch - _sequence"
-
-// credKey returns the backend key for a given account ID and email.
-func credKey(id, email string) string {
-	return fmt.Sprintf("ccswitch - %s-%s", id, email)
-}
 
 // Options configures Engine behaviour.
 type Options struct {
@@ -88,7 +80,8 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 		if !ok {
 			continue
 		}
-		cr, err := e.syncAccount(ctx, id, acct.Email)
+		isActive := id == e.seq.ActiveAccountID
+		cr, err := e.syncAccount(ctx, id, acct.Email, isActive)
 		if err != nil {
 			e.log.Error("sync: account failed", "id", id, "email", acct.Email, "err", err)
 			res.Errors++
@@ -115,7 +108,7 @@ func (e *Engine) Push(ctx context.Context) (Result, error) {
 	if err != nil {
 		return res, fmt.Errorf("push: marshal sequence: %w", err)
 	}
-	if err := e.remote.Write(ctx, sequenceKey, seqData); err != nil {
+	if err := e.remote.Write(ctx, account.SequenceKey, seqData); err != nil {
 		return res, fmt.Errorf("push: write sequence: %w", err)
 	}
 	res.Pushed++
@@ -125,7 +118,7 @@ func (e *Engine) Push(ctx context.Context) (Result, error) {
 		if !ok {
 			continue
 		}
-		key := credKey(id, acct.Email)
+		key := account.BackupCredKey(id, acct.Email)
 		data, err := e.local.Read(ctx, key)
 		if err != nil {
 			if errors.Is(err, backend.ErrNotFound) {
@@ -154,7 +147,7 @@ func (e *Engine) Pull(ctx context.Context) (Result, error) {
 	var res Result
 
 	// Pull sequence metadata, preserving local switchLog.
-	remoteSeqData, err := e.remote.Read(ctx, sequenceKey)
+	remoteSeqData, err := e.remote.Read(ctx, account.SequenceKey)
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
 			return res, fmt.Errorf("pull: no remote sequence; run push first")
@@ -176,7 +169,7 @@ func (e *Engine) Pull(ctx context.Context) (Result, error) {
 		if !ok {
 			continue
 		}
-		key := credKey(id, acct.Email)
+		key := account.BackupCredKey(id, acct.Email)
 		data, err := e.remote.Read(ctx, key)
 		if err != nil {
 			if errors.Is(err, backend.ErrNotFound) {
@@ -204,7 +197,7 @@ func (e *Engine) Pull(ctx context.Context) (Result, error) {
 func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 	var res Result
 
-	remoteData, err := e.remote.Read(ctx, sequenceKey)
+	remoteData, err := e.remote.Read(ctx, account.SequenceKey)
 	if err != nil && !errors.Is(err, backend.ErrNotFound) {
 		return res, fmt.Errorf("read remote sequence: %w", err)
 	}
@@ -215,7 +208,7 @@ func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 		if err != nil {
 			return res, fmt.Errorf("marshal sequence: %w", err)
 		}
-		if err := e.remote.Write(ctx, sequenceKey, data); err != nil {
+		if err := e.remote.Write(ctx, account.SequenceKey, data); err != nil {
 			return res, fmt.Errorf("write remote sequence: %w", err)
 		}
 		e.log.Info("sync: no remote sequence; pushed local state")
@@ -245,7 +238,7 @@ func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 		if err != nil {
 			return res, fmt.Errorf("marshal sequence: %w", err)
 		}
-		if err := e.remote.Write(ctx, sequenceKey, data); err != nil {
+		if err := e.remote.Write(ctx, account.SequenceKey, data); err != nil {
 			return res, fmt.Errorf("write remote sequence: %w", err)
 		}
 		res.Pushed++
@@ -257,12 +250,20 @@ func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 }
 
 // syncAccount resolves credentials for one account between local and remote.
-func (e *Engine) syncAccount(ctx context.Context, id, email string) (Result, error) {
+// For the active account the local source-of-truth is the active slot
+// (account.ActiveCredKey) and pulls write through to BOTH the active slot
+// and the per-account backup slot. Non-active accounts use only the backup
+// slot. Remote always uses the per-account backup slot.
+func (e *Engine) syncAccount(ctx context.Context, id, email string, isActive bool) (Result, error) {
 	var res Result
-	key := credKey(id, email)
+	remoteKey := account.BackupCredKey(id, email)
+	localKey := remoteKey
+	if isActive {
+		localKey = account.ActiveCredKey
+	}
 
-	localData, localErr := e.local.Read(ctx, key)
-	remoteData, remoteErr := e.remote.Read(ctx, key)
+	localData, localErr := e.local.Read(ctx, localKey)
+	remoteData, remoteErr := e.remote.Read(ctx, remoteKey)
 
 	localMissing := errors.Is(localErr, backend.ErrNotFound)
 	remoteMissing := errors.Is(remoteErr, backend.ErrNotFound)
@@ -274,25 +275,36 @@ func (e *Engine) syncAccount(ctx context.Context, id, email string) (Result, err
 		return res, fmt.Errorf("read remote cred %s: %w", id, remoteErr)
 	}
 
+	writePulled := func(data []byte) error {
+		if err := e.local.Write(ctx, localKey, data); err != nil {
+			return err
+		}
+		if isActive {
+			// Also mirror into the per-account backup slot so a subsequent
+			// switch-away preserves the freshly pulled credential.
+			if err := e.local.Write(ctx, remoteKey, data); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	switch {
 	case !localMissing && remoteMissing:
-		// Local only — push.
-		if err := e.remote.Write(ctx, key, localData); err != nil {
+		if err := e.remote.Write(ctx, remoteKey, localData); err != nil {
 			return res, fmt.Errorf("push cred %s: %w", id, err)
 		}
-		e.log.Info("sync: pushed (new in remote)", "id", id, "email", email)
+		e.log.Debug("sync: pushed (new in remote)", "id", id, "email", email)
 		res.Pushed++
 
 	case localMissing && !remoteMissing:
-		// Remote only — pull.
-		if err := e.local.Write(ctx, key, remoteData); err != nil {
+		if err := writePulled(remoteData); err != nil {
 			return res, fmt.Errorf("pull cred %s: %w", id, err)
 		}
-		e.log.Info("sync: pulled (new locally)", "id", id, "email", email)
+		e.log.Debug("sync: pulled (new locally)", "id", id, "email", email)
 		res.Pulled++
 
 	case !localMissing && !remoteMissing:
-		// Both exist — compare expiresAt, newer wins.
 		localCred, err := credentials.Parse(localData)
 		if err != nil {
 			return res, fmt.Errorf("parse local cred %s: %w", id, err)
@@ -307,23 +319,22 @@ func (e *Engine) syncAccount(ctx context.Context, id, email string) (Result, err
 
 		switch {
 		case localExp > remoteExp:
-			if err := e.remote.Write(ctx, key, localData); err != nil {
+			if err := e.remote.Write(ctx, remoteKey, localData); err != nil {
 				return res, fmt.Errorf("push fresher cred %s: %w", id, err)
 			}
-			e.log.Info("sync: pushed (local fresher)", "id", id, "email", email)
+			e.log.Debug("sync: pushed (local fresher)", "id", id, "email", email)
 			res.Pushed++
 		case remoteExp > localExp:
-			if err := e.local.Write(ctx, key, remoteData); err != nil {
+			if err := writePulled(remoteData); err != nil {
 				return res, fmt.Errorf("pull fresher cred %s: %w", id, err)
 			}
-			e.log.Info("sync: pulled (remote fresher)", "id", id, "email", email)
+			e.log.Debug("sync: pulled (remote fresher)", "id", id, "email", email)
 			res.Pulled++
 		default:
 			res.Unchanged++
 		}
 
 	default:
-		// Both missing — nothing to do.
 		res.Unchanged++
 	}
 

@@ -10,13 +10,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 )
-
-// backendErrNotFound aliases the sentinel so errNotFound() can wrap it without
-// an import cycle (this package imports backend, not the other way around).
-var backendErrNotFound = backend.ErrNotFound
 
 // Config holds the connection parameters for a 1Password Connect server.
 type Config struct {
@@ -70,15 +67,26 @@ const credentialsFieldLabel = "credentials"
 // New constructs a Backend and resolves the vault name to its UUID. Returns an
 // error if the vault cannot be found or the Connect server is unreachable.
 func New(cfg Config) (*Backend, error) {
+	// Custom transport with tuned keep-alives — daemon issues batches of
+	// requests to the same Connect host, default MaxIdleConnsPerHost=2 would
+	// force frequent TLS re-handshakes.
+	base := &http.Transport{
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	transport := &authTransport{
-		base:                 http.DefaultTransport,
+		base:                 base,
 		bearerToken:          cfg.BearerToken,
 		cfAccessClientID:     cfg.CFAccessClientID,
 		cfAccessClientSecret: cfg.CFAccessClientSecret,
 	}
 	b := &Backend{
-		cfg:    cfg,
-		client: &http.Client{Transport: transport},
+		cfg: cfg,
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
 	}
 
 	ctx := context.Background()
@@ -285,10 +293,7 @@ func (b *Backend) apiDo(ctx context.Context, method, path string, body any, dest
 	return nil
 }
 
-// errNotFound wraps backend.ErrNotFound with context so Is() still works.
+// errNotFound wraps backend.ErrNotFound with key context so errors.Is works.
 func errNotFound(key string) error {
-	// Import-cycle-safe: use the package-level variable directly.
-	// The file is in the onepassword package so we reference it via the
-	// backend import.
-	return fmt.Errorf("onepassword backend: %q: %w", key, backendErrNotFound)
+	return fmt.Errorf("onepassword backend: %q: %w", key, backend.ErrNotFound)
 }

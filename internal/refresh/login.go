@@ -55,7 +55,7 @@ func LoginRotate(
 		if !ok {
 			continue
 		}
-		key := credKey(id, acct.Email)
+		key := account.BackupCredKey(id, acct.Email)
 		data, err := b.Read(ctx, key)
 		needsLogin := false
 		if errors.Is(err, backend.ErrNotFound) || len(data) == 0 {
@@ -141,7 +141,7 @@ func LoginRotate(
 			continue
 		}
 
-		key := credKey(t.id, t.email)
+		key := account.BackupCredKey(t.id, t.email)
 		if err := b.Write(ctx, key, newData); err != nil {
 			log.Error("login: write credentials failed", "id", t.id, "err", err)
 			fmt.Printf("\nFailed to save credentials for %s\n", t.email)

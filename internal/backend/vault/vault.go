@@ -53,15 +53,10 @@ func New(cfg Config) (*Backend, error) {
 // Name implements backend.Backend.
 func (b *Backend) Name() string { return "vault" }
 
-// kvPath returns the full KV key path for a logical key.
-func (b *Backend) kvPath(key string) string {
-	return key
-}
-
 // Read fetches the "credentials" field stored at the KV path for key. Returns
 // backend.ErrNotFound when the secret does not exist.
 func (b *Backend) Read(ctx context.Context, key string) ([]byte, error) {
-	secret, err := b.kv.Get(ctx, b.kvPath(key))
+	secret, err := b.kv.Get(ctx, key)
 	if err != nil {
 		if isNotFound(err) {
 			return nil, backend.ErrNotFound
@@ -88,7 +83,7 @@ func (b *Backend) Read(ctx context.Context, key string) ([]byte, error) {
 // Write stores data under the "credentials" field at the KV path for key.
 // Overwrites any existing value.
 func (b *Backend) Write(ctx context.Context, key string, data []byte) error {
-	_, err := b.kv.Put(ctx, b.kvPath(key), map[string]interface{}{
+	_, err := b.kv.Put(ctx, key, map[string]interface{}{
 		"credentials": string(data),
 	})
 	if err != nil {
@@ -100,7 +95,7 @@ func (b *Backend) Write(ctx context.Context, key string, data []byte) error {
 // Delete removes the KV secret at key. Returns nil if the secret does not
 // exist (idempotent).
 func (b *Backend) Delete(ctx context.Context, key string) error {
-	err := b.kv.Delete(ctx, b.kvPath(key))
+	err := b.kv.Delete(ctx, key)
 	if err != nil {
 		if isNotFound(err) {
 			return nil

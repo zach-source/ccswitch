@@ -5,6 +5,7 @@
 package config
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,22 +130,16 @@ func applyEnvOverrides(c *Config) {
 	if v := os.Getenv("CCSWITCH_OP_ACCOUNT"); v != "" {
 		c.OnePassword.Account = v
 	}
-	if v := os.Getenv("CCSWITCH_OP_CONNECT_HOST"); v != "" {
-		c.OnePassword.ConnectHost = v
-	} else if v := os.Getenv("OP_CONNECT_HOST"); v != "" {
+	if v := cmp.Or(os.Getenv("CCSWITCH_OP_CONNECT_HOST"), os.Getenv("OP_CONNECT_HOST")); v != "" {
 		c.OnePassword.ConnectHost = v
 	}
-	if v := os.Getenv("CCSWITCH_VAULT_ADDR"); v != "" {
-		c.Vault.Addr = v
-	} else if v := os.Getenv("VAULT_ADDR"); v != "" {
+	if v := cmp.Or(os.Getenv("CCSWITCH_VAULT_ADDR"), os.Getenv("VAULT_ADDR")); v != "" {
 		c.Vault.Addr = v
 	}
 	if v := os.Getenv("CCSWITCH_VAULT_PATH"); v != "" {
 		c.Vault.Path = v
 	}
-	if v := os.Getenv("CCSWITCH_VAULT_TOKEN"); v != "" {
-		c.Vault.Token = v
-	} else if v := os.Getenv("VAULT_TOKEN"); v != "" {
+	if v := cmp.Or(os.Getenv("CCSWITCH_VAULT_TOKEN"), os.Getenv("VAULT_TOKEN")); v != "" {
 		c.Vault.Token = v
 	}
 	if v := os.Getenv("CCSWITCH_SYNC_INTERVAL"); v != "" {

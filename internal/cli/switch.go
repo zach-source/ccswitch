@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -40,7 +41,7 @@ func newSwitchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return performSwitch(cfg, seq, targetID)
+			return performSwitch(cmd, cfg, seq, targetID)
 		},
 	}
 }
@@ -68,7 +69,7 @@ func newSwitchToCmd() *cobra.Command {
 			if id == "" {
 				return fmt.Errorf("no account found matching: %s", args[0])
 			}
-			return performSwitch(cfg, seq, id)
+			return performSwitch(cmd, cfg, seq, id)
 		},
 	}
 }
@@ -133,20 +134,48 @@ func pickWithPrompt(ids []string, lines []string) (string, error) {
 	return ids[n-1], nil
 }
 
-// performSwitch activates the target account: saves current creds, loads target
-// creds, writes them to the active backend slot, and updates sequence.json.
-func performSwitch(cfg *config.Config, seq *account.Sequence, targetID string) error {
-	_ = cfg // backend integration stubbed; will be wired when backend packages are ready
+// performSwitch activates the target account: copies the target's backup
+// credentials into the active slot of the local backend, updates
+// sequence.json, and prints the post-switch instructions.
+func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence, targetID string) error {
+	acct, ok := seq.Accounts[targetID]
+	if !ok {
+		return fmt.Errorf("account %s not found", targetID)
+	}
 
-	acct := seq.Accounts[targetID]
+	localCfg := *cfg
+	localCfg.Backend = autoLocalBackend()
+	local, err := resolveBackend(&localCfg)
+	if err != nil {
+		return fmt.Errorf("resolve local backend: %w", err)
+	}
 
-	// TODO: When backend packages are ready:
-	//   b, err := resolveBackend(cfg)
-	//   1. b.Write(ctx, "Claude Code-credentials", targetCreds)
-	//   2. Patch .claude.json oauthAccount section
-	// For now we update sequence.json only.
+	ctx := cmd.Context()
+
+	// Save the currently-active account's creds into its own backup slot
+	// before overwriting the active slot — preserves "save before switch".
+	if seq.ActiveAccountID != "" && seq.ActiveAccountID != targetID {
+		if cur, ok := seq.Accounts[seq.ActiveAccountID]; ok {
+			if data, err := local.Read(ctx, account.ActiveCredKey); err == nil && len(data) > 0 {
+				_ = local.Write(ctx, account.BackupCredKey(seq.ActiveAccountID, cur.Email), data)
+			}
+		}
+	}
+
+	// Copy the target account's backup creds into the active slot.
+	data, err := local.Read(ctx, account.BackupCredKey(targetID, acct.Email))
+	if err != nil {
+		return fmt.Errorf("read target creds: %w", err)
+	}
+	if err := local.Write(ctx, account.ActiveCredKey, data); err != nil {
+		return fmt.Errorf("write active slot: %w", err)
+	}
 
 	seq.ActiveAccountID = targetID
+	seq.SwitchLog = append(seq.SwitchLog, account.SwitchLogEntry{
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		To:        targetID,
+	})
 	if err := seq.Save(sequencePath()); err != nil {
 		return fmt.Errorf("save sequence: %w", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/account"
@@ -122,7 +123,7 @@ func RefreshAll(
 			continue
 		}
 
-		key := credKey(id, acct.Email)
+		key := account.BackupCredKey(id, acct.Email)
 		data, err := b.Read(ctx, key)
 		if err != nil {
 			if errors.Is(err, backend.ErrNotFound) {
@@ -168,11 +169,6 @@ func RefreshAll(
 	return refreshed, nil
 }
 
-// credKey returns the backend key for (id, email) — matches sync package convention.
-func credKey(id, email string) string {
-	return fmt.Sprintf("ccswitch - %s-%s", id, email)
-}
-
 // filteredEnv returns os.Environ() with CLAUDE_CONFIG_DIR and
 // CLAUDE_CODE_OAUTH_REFRESH_TOKEN stripped so our injected values take effect.
 func filteredEnv() []string {
@@ -184,13 +180,7 @@ func filteredEnv() []string {
 	env := os.Environ()
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
-		key := kv
-		for i := 0; i < len(kv); i++ {
-			if kv[i] == '=' {
-				key = kv[:i]
-				break
-			}
-		}
+		key, _, _ := strings.Cut(kv, "=")
 		if !blocked[key] {
 			out = append(out, kv)
 		}
