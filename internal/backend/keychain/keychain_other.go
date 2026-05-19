@@ -7,6 +7,7 @@ package keychain
 
 import (
 	"context"
+	"time"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 )
@@ -38,6 +39,12 @@ func (b *Backend) Delete(_ context.Context, _ string) error {
 // HealthCheck implements backend.Backend.
 func (b *Backend) HealthCheck(_ context.Context) error {
 	return ErrNotSupported
+}
+
+// LookupHashedActiveSlot is unsupported on non-Darwin platforms — claude
+// 2.x's per-CLAUDE_CONFIG_DIR hashed keychain item is a macOS-only mechanism.
+func (b *Backend) LookupHashedActiveSlot(_ context.Context, _ time.Time) ([]byte, error) {
+	return nil, ErrNotSupported
 }
 
 // Compile-time interface check.

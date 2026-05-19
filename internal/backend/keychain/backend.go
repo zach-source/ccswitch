@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"os/user"
+	"strings"
+	"time"
 
 	gokeychain "github.com/keybase/go-keychain"
 
@@ -121,6 +123,66 @@ func (b *Backend) Delete(_ context.Context, key string) error {
 		return fmt.Errorf("keychain backend: delete %q: %w", key, err)
 	}
 	return nil
+}
+
+// LookupHashedActiveSlot returns the data of a generic-password keychain
+// item whose service starts with "Claude Code-credentials-" and whose
+// modification date is at or after since.
+//
+// claude 2.x writes the per-CLAUDE_CONFIG_DIR isolated active credential
+// to a keychain service of the form "Claude Code-credentials-<8hex>",
+// where the suffix is an opaque hash of the CONFIG_DIR path. ccswitch
+// cannot reasonably mirror that hashing, so the conformance suite finds
+// the freshly-written item by enumeration + modification-date filter.
+// Returns (nil, nil) when no matching item exists. The most-recently-
+// modified match is returned when several qualify.
+func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, error) {
+	acct, err := currentUser()
+	if err != nil {
+		return nil, err
+	}
+
+	// Security.framework rejects MatchLimitAll combined with both
+	// SetReturnAttributes and SetReturnData (errSecParam, -50). Do this in
+	// two steps: enumerate to find the freshest matching service name, then
+	// Read its data via the standard single-item path.
+	q := gokeychain.NewItem()
+	q.SetSecClass(gokeychain.SecClassGenericPassword)
+	q.SetAccount(acct)
+	q.SetMatchLimit(gokeychain.MatchLimitAll)
+	q.SetReturnAttributes(true)
+
+	results, err := gokeychain.QueryItem(q)
+	if err != nil {
+		if err == gokeychain.ErrorItemNotFound { //nolint:errorlint
+			return nil, nil
+		}
+		return nil, fmt.Errorf("keychain backend: enumerate generic passwords: %w", err)
+	}
+
+	// Allow a small clock-skew tolerance — keychain mdat is second-grained.
+	floor := since.Add(-2 * time.Second)
+
+	var newestSvc string
+	var newestMdat time.Time
+	var found bool
+	for _, r := range results {
+		if !strings.HasPrefix(r.Service, "Claude Code-credentials-") {
+			continue
+		}
+		if r.ModificationDate.Before(floor) {
+			continue
+		}
+		if !found || r.ModificationDate.After(newestMdat) {
+			newestSvc = r.Service
+			newestMdat = r.ModificationDate
+			found = true
+		}
+	}
+	if !found {
+		return nil, nil
+	}
+	return b.Read(ctx, newestSvc)
 }
 
 // HealthCheck verifies that the keychain is accessible by performing a

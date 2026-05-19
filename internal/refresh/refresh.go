@@ -100,13 +100,15 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials, local backen
 		"CLAUDE_CODE_OAUTH_SCOPES="+oauthScopes,
 	)
 
-	// Snapshot the local active slot so a post-run change can be attributed
-	// to claude (rather than re-reading a stale prior value as if it were
-	// fresh). The legacy file path is preferred when present.
+	// Snapshot the local active slot AND the wall-clock so a post-run
+	// change can be attributed to claude (rather than re-reading a stale
+	// prior value as if it were fresh). The wall-clock feeds the hashed-
+	// slot lookup, which filters by modification date.
 	var beforeActive []byte
 	if local != nil {
 		beforeActive, _ = local.Read(ctx, account.ActiveCredKey)
 	}
+	since := time.Now()
 
 	if err := cmd.Run(); err != nil {
 		return nil, nil, fmt.Errorf("refresh: claude auth login: %w", err)
@@ -116,7 +118,7 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials, local backen
 	// parse below is only an inspection lens. credData (the seed we wrote
 	// to credFile above) lets capture distinguish "claude rewrote the
 	// file" from "the seed is still there."
-	newData := captureClaudeCredential(ctx, tmpConfig, credData, local, beforeActive)
+	newData := captureClaudeCredential(ctx, tmpConfig, credData, local, beforeActive, since)
 	if len(newData) == 0 {
 		return nil, nil, fmt.Errorf("refresh: claude auth login did not produce credentials")
 	}

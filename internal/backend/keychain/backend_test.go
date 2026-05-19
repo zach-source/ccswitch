@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
@@ -93,3 +94,38 @@ func TestBackend_Name(t *testing.T) {
 
 // Compile-time interface check.
 var _ backend.Backend = (*keychain.Backend)(nil)
+
+// TestBackend_LookupHashedActiveSlot writes a "Claude Code-credentials-<x>"
+// item and asserts LookupHashedActiveSlot finds it. claude 2.x writes
+// hashed slots like that when CLAUDE_CONFIG_DIR is set; ccswitch enumerates
+// to capture them because the hash is opaque.
+func TestBackend_LookupHashedActiveSlot(t *testing.T) {
+	ctx := context.Background()
+	b := keychain.New()
+
+	// Use a clearly-test-only suffix so we never collide with real items.
+	const svc = "Claude Code-credentials-ccswitchtest"
+	t.Cleanup(func() {
+		_ = b.Delete(ctx, svc)
+	})
+
+	since := time.Now().Add(-1 * time.Second)
+	payload := []byte(`{"claudeAiOauth":{"accessToken":"hashed-AT","refreshToken":"hashed-RT","expiresAt":1}}`)
+	if err := b.Write(ctx, svc, payload); err != nil {
+		t.Fatalf("seed write: %v", err)
+	}
+
+	got, err := b.LookupHashedActiveSlot(ctx, since)
+	if err != nil {
+		t.Fatalf("LookupHashedActiveSlot: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Fatalf("payload mismatch:\n want %s\n  got %s", payload, got)
+	}
+
+	// A future `since` filters the item out.
+	future := time.Now().Add(1 * time.Hour)
+	if got, err := b.LookupHashedActiveSlot(ctx, future); err != nil || got != nil {
+		t.Fatalf("future since must return (nil, nil): got=%q err=%v", got, err)
+	}
+}
