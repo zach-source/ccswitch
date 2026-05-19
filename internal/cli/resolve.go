@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -144,9 +143,17 @@ func resolveBackend(cfg *config.Config) (backend.Backend, error) {
 }
 
 // newOnePasswordBackend loads the three Connect/CF Access secrets from
-// the macOS Keychain (or file fallback) and constructs the HTTP backend.
-// Connect mode requires at least the bearer token; CF Access pair is
-// optional (used only when the Connect server sits behind Cloudflare Access).
+// 0600 files under ~/.config/ccswitch/ and constructs the HTTP backend.
+// Connect mode requires at least the bearer token; the CF Access pair is
+// optional (only needed when the Connect server sits behind Cloudflare
+// Access).
+//
+// File storage (vs. keychain) is deliberate: macOS keychain ACLs match
+// the calling binary's code identity, and Nix builds ccswitch into a
+// fresh /nix/store/<hash>/ path on every rebuild. Every rebuild made the
+// keychain re-prompt — every 5 minutes for the launchd sync daemon,
+// every release for everyone. Files at 0600 are the same security
+// posture (user-only) without the per-build ACL invalidation.
 func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 	if cfg.OnePassword.ConnectHost == "" {
 		return nil, errors.New("1password backend: connect_host not configured (run `ccswitch setup-op-connect`)")
@@ -157,32 +164,34 @@ func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 		return nil, fmt.Errorf("1password backend: %w", err)
 	}
 
-	kc := keychain.New()
-	ctx := context.Background()
-
-	loadSecret := func(service string) (string, error) {
-		data, err := kc.Read(ctx, service)
-		if errors.Is(err, backend.ErrNotFound) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("1password backend: %w", err)
+	}
+	secretsDir := filepath.Join(home, ".config", "ccswitch")
+	readSecret := func(name string) (string, error) {
+		data, err := os.ReadFile(filepath.Join(secretsDir, name))
+		if os.IsNotExist(err) {
 			return "", nil
 		}
 		if err != nil {
-			return "", fmt.Errorf("read %s from keychain: %w", service, err)
+			return "", fmt.Errorf("read %s: %w", name, err)
 		}
-		return string(data), nil
+		return strings.TrimRight(string(data), "\n"), nil
 	}
 
-	bearer, err := loadSecret(cfg.OnePassword.ConnectTokenKeychainService)
+	bearer, err := readSecret("connect-token")
 	if err != nil {
 		return nil, err
 	}
 	if bearer == "" {
-		return nil, errors.New("1password backend: Connect bearer token missing from keychain (run `ccswitch setup-op-connect`)")
+		return nil, errors.New("1password backend: Connect bearer token missing from ~/.config/ccswitch/ (run `ccswitch setup-op-connect`)")
 	}
-	cfID, err := loadSecret(cfg.OnePassword.CFAccessClientIDService)
+	cfID, err := readSecret("cf-access-client-id")
 	if err != nil {
 		return nil, err
 	}
-	cfSecret, err := loadSecret(cfg.OnePassword.CFAccessClientSecretService)
+	cfSecret, err := readSecret("cf-access-client-secret")
 	if err != nil {
 		return nil, err
 	}
