@@ -25,6 +25,9 @@ import (
 //  3. After claude exits, reads .credentials.json from the isolated dir and
 //     writes it to b under the account's key.
 //
+// When force is true every selected account is re-authenticated regardless of
+// its credential state.
+//
 // Unlike RefreshOne, this function is interactive: it inherits the terminal's
 // stdin/stdout/stderr so the user can interact with the claude CLI.
 // It returns the number of accounts successfully refreshed.
@@ -33,6 +36,7 @@ func LoginRotate(
 	seq *account.Sequence,
 	b backend.Backend,
 	expiryBuffer time.Duration,
+	force bool,
 	log *slog.Logger,
 ) (int, error) {
 	if log == nil {
@@ -56,15 +60,16 @@ func LoginRotate(
 		if !ok {
 			continue
 		}
-		key := account.BackupCredKey(id, acct.Email)
-		data, err := b.Read(ctx, key)
-		needsLogin := false
-		if errors.Is(err, backend.ErrNotFound) || len(data) == 0 {
-			needsLogin = true
-		} else if err == nil {
-			cred, parseErr := credentials.Parse(data)
-			if parseErr != nil || cred.IsExpired(expiryBuffer) {
+		needsLogin := force
+		if !needsLogin {
+			data, err := b.Read(ctx, account.BackupCredKey(id, acct.Email))
+			if errors.Is(err, backend.ErrNotFound) || len(data) == 0 {
 				needsLogin = true
+			} else if err == nil {
+				cred, parseErr := credentials.Parse(data)
+				if parseErr != nil || cred.IsExpired(expiryBuffer) {
+					needsLogin = true
+				}
 			}
 		}
 		if needsLogin {

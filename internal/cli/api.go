@@ -59,6 +59,9 @@ func newUseZaiCmd() *cobra.Command {
 			fmt.Printf("  Base URL: %s\n", zaiBaseURL)
 			fmt.Printf("  Timeout:  %sms\n", zaiTimeoutMS)
 			fmt.Println()
+			fmt.Printf("Security note: the API token is now stored in plaintext in %s\n", path)
+			fmt.Println("(mode 0600). Exclude that file from dotfile sync and backups.")
+			fmt.Println()
 			fmt.Println("Restart Claude Code to use the new configuration.")
 			return nil
 		},
@@ -142,12 +145,14 @@ func newAPIStatusCmd() *cobra.Command {
 // direct `op read`. Returns a clear error if neither yields a token.
 func fetchZaiToken() (string, error) {
 	home, _ := os.UserHomeDir()
+	// The cache helper lives under the user-owned ~/.claude. Run it directly
+	// rather than stat-then-exec: the os.Stat/mode precheck was a TOCTOU, and
+	// a missing or non-executable file just surfaces as the exec error the
+	// `err == nil` guard below already handles.
 	cache := filepath.Join(home, ".claude", "scripts", "mcp-secret-cache.sh")
-	if info, err := os.Stat(cache); err == nil && info.Mode()&0o111 != 0 {
-		if out, err := exec.Command(cache, "get", "zai", "ZAI_API_TOKEN").Output(); err == nil {
-			if tok := strings.TrimSpace(string(out)); tok != "" {
-				return tok, nil
-			}
+	if out, err := exec.Command(cache, "get", "zai", "ZAI_API_TOKEN").Output(); err == nil {
+		if tok := strings.TrimSpace(string(out)); tok != "" {
+			return tok, nil
 		}
 	}
 

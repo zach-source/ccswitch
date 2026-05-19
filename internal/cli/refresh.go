@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -118,15 +117,8 @@ func newLoginCmd() *cobra.Command {
 				target = &narrowed
 			}
 
-			// --force makes every selected account look expired so it is
-			// re-authenticated: a buffer longer than any token lifetime
-			// guarantees IsExpired() is true.
-			buffer := cfg.Refresh.ExpiryBuffer
-			if force {
-				buffer = 100 * 365 * 24 * time.Hour
-			}
-
-			_, err = refresh.LoginRotate(cmd.Context(), target, b, buffer, cliLogger(false))
+			_, err = refresh.LoginRotate(cmd.Context(), target, b,
+				cfg.Refresh.ExpiryBuffer, force, cliLogger(false))
 			return err
 		},
 	}
