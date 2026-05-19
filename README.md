@@ -109,10 +109,16 @@ only when the relevant feature is used:
 ## Development
 
 ```bash
-make build    # compile ./bin/ccswitch
-make check    # go vet + unit tests
-make smoke    # bats CLI smoke tests against the built binary
+make build        # compile ./bin/ccswitch
+make check        # go vet + Go unit tests
+make smoke        # bats CLI smoke tests against the built binary
+make conformance  # full regression gate: vet + Go tests + bats — run before every change
 ```
+
+`make conformance` is the gate to run before committing a change. The Go
+tests and the bats suite both run hermetically — an isolated `$HOME` with the
+file backend forced — so they never touch the real keychain, 1Password, or
+network.
 
 ## License
 

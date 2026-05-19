@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -28,19 +27,17 @@ func newSaveCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if seq.ActiveAccountID == "" {
-				return fmt.Errorf("no active account in sequence.json")
-			}
 
-			activeEmail := currentEmail()
-			if activeEmail == "" {
+			// Resolve the live active account from .claude.json, not the
+			// (possibly stale) recorded activeAccountId — saving the active
+			// slot under the wrong account's backup key would misfile it.
+			id := activeID(seq)
+			if id == "" {
 				return fmt.Errorf("no active Claude account found")
 			}
-
-			activeAcct := seq.Accounts[seq.ActiveAccountID]
-			if activeEmail != activeAcct.Email {
-				fmt.Fprintf(os.Stderr, "Warning: active account (%s) doesn't match expected (%s)\n",
-					activeEmail, activeAcct.Email)
+			activeAcct, ok := seq.Accounts[id]
+			if !ok {
+				return fmt.Errorf("active account %s is not managed; run `ccswitch add-account` first", id)
 			}
 
 			// Read active credentials from the configured backend.
@@ -60,14 +57,14 @@ func newSaveCmd() *cobra.Command {
 				return fmt.Errorf("parse credentials: %w", err)
 			}
 
-			backupKey := account.BackupCredKey(seq.ActiveAccountID, activeAcct.Email)
+			backupKey := account.BackupCredKey(id, activeAcct.Email)
 			if err := b.Write(ctx, backupKey, credsData); err != nil {
 				return fmt.Errorf("write backup credentials: %w", err)
 			}
 
 			hoursLeft := creds.HoursLeft()
 			fmt.Printf("Saved credentials for %s (%s, expires in %.1fh)\n",
-				seq.ActiveAccountID, activeAcct.Email, hoursLeft)
+				id, activeAcct.Email, hoursLeft)
 			return nil
 		},
 	}

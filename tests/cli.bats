@@ -15,8 +15,11 @@ setup() {
     # Isolated HOME so the suite cannot read or mutate real state.
     export HOME="$BATS_TEST_TMPDIR/home"
     mkdir -p "$HOME/.claude" "$HOME/.claude-switch-backup"
-    # Force the file backend — no keychain / 1Password / network.
+    # Force the file backend for BOTH the remote and the local (active-slot)
+    # side — no keychain / 1Password / network is touched by the suite.
     export CCSWITCH_BACKEND=file
+    export CCSWITCH_LOCAL_BACKEND=file
+    export CCSWITCH_CONFIG_FILE="$HOME/.config/ccswitch/config.toml"
 
     # A two-account sequence.json; activeAccountId deliberately disagrees
     # with .claude.json to exercise live-state resolution. Account IDs are
@@ -147,4 +150,71 @@ JSON
     run "$CCSWITCH" list
     [ "$status" -eq 0 ]
     [[ "$output" == *"No accounts are managed yet"* ]]
+}
+
+# seed_cred writes a raw credential blob into the file backend, mirroring
+# file.Backend.keyToPath: <root>/.<key>.json (path separators become
+# underscores — none of these keys contain any).
+seed_cred() {
+    local key="$1" json="$2"
+    local dir="$HOME/.claude-switch-backup/credentials"
+    mkdir -p "$dir"
+    printf '%s' "$json" > "$dir/.${key}.json"
+}
+
+@test "switch-to: success path swaps the active credential slot" {
+    seed_cred "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"alice-live","refreshToken":"r","expiresAt":111}}'
+    seed_cred "Claude Code-Account-5ff860bf-bob@example.com" '{"claudeAiOauth":{"accessToken":"bob","refreshToken":"r","expiresAt":222}}'
+
+    run "$CCSWITCH" switch-to 5ff860bf
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Switched to"* ]]
+
+    # sequence.json records bob as active; the active slot now holds his token.
+    grep -q '"activeAccountId": "5ff860bf"' "$HOME/.claude-switch-backup/sequence.json"
+    grep -q '"accessToken":"bob"' "$HOME/.claude-switch-backup/credentials/.Claude Code-credentials.json"
+}
+
+@test "add-account: registers a newly logged-in account" {
+    # Re-point .claude.json at an account not yet in sequence.json.
+    cat > "$HOME/.claude.json" <<'JSON'
+{"oauthAccount": {"emailAddress": "carol@example.com", "organizationName": "Carol's Organization"}}
+JSON
+    run "$CCSWITCH" add-account
+    [ "$status" -eq 0 ]
+    grep -q 'carol@example.com' "$HOME/.claude-switch-backup/sequence.json"
+}
+
+@test "init-config: creates the config TOML" {
+    run "$CCSWITCH" init-config
+    [ "$status" -eq 0 ]
+    [ -f "$CCSWITCH_CONFIG_FILE" ]
+}
+
+@test "config: reports the active backend" {
+    run "$CCSWITCH" config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"file"* ]]
+}
+
+@test "env --unset: emits the shell unset line" {
+    run "$CCSWITCH" env --unset
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"unset CLAUDE_CONFIG_DIR"* ]]
+}
+
+@test "env: refuses a world-accessible --config-dir" {
+    echo '{"claudeAiOauth":{"accessToken":"x","refreshToken":"r","expiresAt":1}}' > "$HOME/creds.json"
+    mkdir -p "$HOME/baddir"
+    chmod 0777 "$HOME/baddir"
+    run "$CCSWITCH" env --creds-file "$HOME/creds.json" --config-dir "$HOME/baddir"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"group/world-accessible"* ]]
+}
+
+@test "save: copies the active slot into the live account's backup slot" {
+    seed_cred "Claude Code-credentials" '{"claudeAiOauth":{"accessToken":"alice-tok","refreshToken":"r","expiresAt":999}}'
+    run "$CCSWITCH" save
+    [ "$status" -eq 0 ]
+    grep -q '"accessToken":"alice-tok"' "$HOME/.claude-switch-backup/credentials/.Claude Code-Account-ff8d9819-alice@example.com.json"
 }

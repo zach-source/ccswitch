@@ -54,6 +54,14 @@
           type = "app";
           program = "${self.packages.${system}.ccswitch}/bin/ccswitch";
         };
+
+        # `nix develop` — toolchain for `make conformance` (Go + bats).
+        devShells.default = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.bats
+          ];
+        };
       }
     )
     // {
