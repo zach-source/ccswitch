@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/account"
@@ -106,11 +107,7 @@ func LoginRotate(
 		}
 
 		// Seed a stub .claude.json so onboarding is skipped.
-		_ = os.WriteFile(
-			fmt.Sprintf("%s/.claude.json", tmpConfig),
-			[]byte(seedJSON),
-			0o600,
-		)
+		_ = os.WriteFile(filepath.Join(tmpConfig, ".claude.json"), []byte(seedJSON), 0o600)
 
 		cmd := exec.CommandContext(ctx, claudePath)
 		cmd.Dir = tmpWork
@@ -122,7 +119,7 @@ func LoginRotate(
 		_ = cmd.Run() // interactive; ignore exit code
 
 		// Capture credentials written by claude.
-		credFile := fmt.Sprintf("%s/.credentials.json", tmpConfig)
+		credFile := filepath.Join(tmpConfig, ".credentials.json")
 		newData, readErr := os.ReadFile(credFile)
 
 		_ = os.RemoveAll(tmpConfig)

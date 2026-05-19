@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/zach-source/ccswitch/internal/account"
 	"github.com/zach-source/ccswitch/internal/config"
 )
 
@@ -39,6 +38,3 @@ func newPullCmd() *cobra.Command {
 		},
 	}
 }
-
-// Compile-time check that Engine exposes the Sequence accessor we need.
-var _ = (*account.Sequence)(nil)

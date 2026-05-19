@@ -1,9 +1,7 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -45,19 +43,8 @@ func newListCmd() *cobra.Command {
 	}
 }
 
-// currentEmail reads the email from ~/.claude/.claude.json. Returns "" on any error.
+// currentEmail returns the live Claude Code account email, or "" if there is
+// no usable account. Thin wrapper over readClaudeIdentity.
 func currentEmail() string {
-	data, err := os.ReadFile(claudeConfigPath())
-	if err != nil {
-		return ""
-	}
-	var j struct {
-		OAuthAccount struct {
-			EmailAddress string `json:"emailAddress"`
-		} `json:"oauthAccount"`
-	}
-	if err := json.Unmarshal(data, &j); err != nil {
-		return ""
-	}
-	return j.OAuthAccount.EmailAddress
+	return readClaudeIdentity().Email
 }

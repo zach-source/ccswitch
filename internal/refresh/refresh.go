@@ -111,8 +111,12 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials) ([]byte, *cr
 
 // RefreshAll iterates every account in seq, refreshes those whose credentials
 // are within expiryBuffer of expiry, and writes the result to b.
-// It returns the number of accounts successfully refreshed and any non-fatal
-// per-account errors logged via log.
+//
+// It returns the number of accounts successfully refreshed. If one or more
+// accounts hit a hard error (read/parse/refresh/write failure) it also
+// returns a non-nil error so a non-interactive caller — a cron or launchd
+// wrapper — can detect the partial failure via a non-zero exit code. An
+// account with no stored credentials is a skip, not a failure.
 func RefreshAll(
 	ctx context.Context,
 	seq *account.Sequence,
@@ -125,6 +129,7 @@ func RefreshAll(
 	}
 
 	refreshed := 0
+	failed := 0
 	for _, id := range seq.IDs() {
 		acct, ok := seq.Accounts[id]
 		if !ok {
@@ -139,12 +144,14 @@ func RefreshAll(
 				continue
 			}
 			log.Error("refresh-all: read failed", "id", id, "err", err)
+			failed++
 			continue
 		}
 
 		cred, err := credentials.Parse(data)
 		if err != nil {
 			log.Error("refresh-all: parse failed", "id", id, "err", err)
+			failed++
 			continue
 		}
 
@@ -157,12 +164,14 @@ func RefreshAll(
 		newData, newCred, err := RefreshOne(ctx, cred)
 		if err != nil {
 			log.Error("refresh-all: refresh failed", "id", id, "err", err)
+			failed++
 			continue
 		}
 
 		// Persist the raw credential bytes verbatim — no struct round-trip.
 		if err := b.Write(ctx, key, newData); err != nil {
 			log.Error("refresh-all: write failed", "id", id, "err", err)
+			failed++
 			continue
 		}
 
@@ -170,6 +179,9 @@ func RefreshAll(
 		refreshed++
 	}
 
+	if failed > 0 {
+		return refreshed, fmt.Errorf("refresh-all: %d account(s) failed to refresh", failed)
+	}
 	return refreshed, nil
 }
 

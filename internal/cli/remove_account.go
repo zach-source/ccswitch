@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -58,11 +57,19 @@ func newRemoveAccountCmd() *cobra.Command {
 			b, backendErr := resolveBackend(cfg)
 			if backendErr == nil {
 				key := account.BackupCredKey(id, acct.Email)
-				if delErr := b.Delete(context.Background(), key); delErr != nil {
+				if delErr := b.Delete(cmd.Context(), key); delErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not delete backend credentials: %v\n", delErr)
 				}
 			} else {
 				fmt.Fprintf(os.Stderr, "Warning: backend not available (%v); skipping credential deletion\n", backendErr)
+			}
+
+			// Remove the isolated env directory, if any — it can hold a
+			// cached plaintext .credentials.json for this account.
+			if envDir := envDirPath(id); envDir != "" {
+				if rmErr := os.RemoveAll(envDir); rmErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not remove %s: %v\n", envDir, rmErr)
+				}
 			}
 
 			seq.Remove(id)

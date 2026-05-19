@@ -2,8 +2,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +30,40 @@ func displayOrg(org string) string {
 	return org
 }
 
+// claudeIdentity is the subset of ~/.claude/.claude.json that ccswitch reads:
+// the live OAuth account Claude Code is currently using.
+type claudeIdentity struct {
+	Email string
+	UUID  string
+	Org   string
+}
+
+// readClaudeIdentity reads the live Claude Code account identity. A missing
+// file or absent account yields a zero claudeIdentity (not an error) so every
+// caller can treat "no identity" uniformly. This is the single decoder for
+// .claude.json — do not re-inline the oauthAccount struct elsewhere.
+func readClaudeIdentity() claudeIdentity {
+	data, err := os.ReadFile(claudeConfigPath())
+	if err != nil {
+		return claudeIdentity{}
+	}
+	var j struct {
+		OAuthAccount struct {
+			EmailAddress     string `json:"emailAddress"`
+			AccountUUID      string `json:"accountUuid"`
+			OrganizationName string `json:"organizationName"`
+		} `json:"oauthAccount"`
+	}
+	if err := json.Unmarshal(data, &j); err != nil {
+		return claudeIdentity{}
+	}
+	return claudeIdentity{
+		Email: j.OAuthAccount.EmailAddress,
+		UUID:  j.OAuthAccount.AccountUUID,
+		Org:   j.OAuthAccount.OrganizationName,
+	}
+}
+
 // activeID returns the ID of the account currently logged in to Claude Code.
 // The live source of truth is ~/.claude/.claude.json, not sequence.json's
 // activeAccountId field — that recorded value goes stale whenever the user
@@ -37,7 +74,7 @@ func activeID(seq *account.Sequence) string {
 	if seq == nil {
 		return ""
 	}
-	if email := currentEmail(); email != "" {
+	if email := readClaudeIdentity().Email; email != "" {
 		if id := account.HashEmail(email); id != "" {
 			if _, ok := seq.Accounts[id]; ok {
 				return id
@@ -45,6 +82,40 @@ func activeID(seq *account.Sequence) string {
 		}
 	}
 	return seq.ActiveAccountID
+}
+
+// validateConnectHost rejects a 1Password Connect URL that would transmit the
+// bearer token in cleartext. https:// is always allowed; http:// is allowed
+// only for a loopback host (a local Connect sidecar is a legitimate setup, a
+// remote cleartext one exposes the token to the network).
+func validateConnectHost(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid Connect URL %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("Connect host %q uses http:// — cleartext is permitted "+
+			"only for a loopback host; use https://", raw)
+	default:
+		return fmt.Errorf("Connect URL must start with http:// or https://, got %q", raw)
+	}
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP literal.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // resolveBackend returns the Backend implementation for the effective type.
@@ -79,6 +150,11 @@ func resolveBackend(cfg *config.Config) (backend.Backend, error) {
 func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 	if cfg.OnePassword.ConnectHost == "" {
 		return nil, errors.New("1password backend: connect_host not configured (run `ccswitch setup-op-connect`)")
+	}
+	// Enforced here — the chokepoint for both the TOML and env-var
+	// (CCSWITCH_OP_CONNECT_HOST / OP_CONNECT_HOST) config paths.
+	if err := validateConnectHost(cfg.OnePassword.ConnectHost); err != nil {
+		return nil, fmt.Errorf("1password backend: %w", err)
 	}
 
 	kc := keychain.New()
@@ -139,6 +215,14 @@ func backupDir() string {
 // sequencePath returns the canonical path for sequence.json.
 func sequencePath() string {
 	return filepath.Join(backupDir(), "sequence.json")
+}
+
+// envDirPath returns the default isolated CLAUDE_CONFIG_DIR for a managed
+// account — the directory `ccswitch env <id>` binds a shell to. It is the
+// single source of truth for this path, shared by env and remove-account.
+func envDirPath(id string) string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude-env-"+id)
 }
 
 // claudeConfigPath returns the path to ~/.claude/.claude.json with a fallback.

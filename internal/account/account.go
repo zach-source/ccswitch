@@ -173,6 +173,20 @@ func (s *Sequence) Remove(id string) bool {
 	return true
 }
 
+// SetWeeklyLimit records a weekly token limit on the account identified by
+// id. Returns false if no such account exists. Encapsulating the map-value
+// read-modify-write here keeps callers from forgetting the write-back that a
+// bare `s.Accounts[id]` copy would silently require.
+func (s *Sequence) SetWeeklyLimit(id string, limit int64) bool {
+	acct, ok := s.Accounts[id]
+	if !ok {
+		return false
+	}
+	acct.WeeklyTokenLimit = limit
+	s.Accounts[id] = acct
+	return true
+}
+
 // Resolve returns the account ID for a hash, email, or 1-based numeric
 // index identifier. Empty string if no match.
 func (s *Sequence) Resolve(identifier string) string {

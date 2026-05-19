@@ -1,18 +1,15 @@
 //go:build !darwin
 
 // Package keychain provides a stub on non-Darwin platforms so that the package
-// compiles everywhere. All operations return a "not supported" sentinel error.
+// compiles everywhere. All operations return ErrNotSupported (declared in
+// errors.go).
 package keychain
 
 import (
 	"context"
-	"errors"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 )
-
-// ErrNotSupported is returned by all operations on non-macOS platforms.
-var ErrNotSupported = errors.New("keychain backend: not supported on this platform")
 
 // Backend is an unsupported stub on non-Darwin builds.
 type Backend struct{}

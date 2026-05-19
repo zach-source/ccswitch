@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -33,25 +32,10 @@ func newAddAccountCmd() *cobra.Command {
 				return fmt.Errorf("create backup dir: %w", err)
 			}
 
-			// Read active Claude identity from .claude.json.
-			configPath := claudeConfigPath()
-			data, err := os.ReadFile(configPath)
-			if err != nil {
-				return fmt.Errorf("cannot read %s: %w — please log in to Claude first", configPath, err)
-			}
-			var claudeJSON struct {
-				OAuthAccount struct {
-					EmailAddress     string `json:"emailAddress"`
-					AccountUUID      string `json:"accountUuid"`
-					OrganizationName string `json:"organizationName"`
-				} `json:"oauthAccount"`
-			}
-			if err := json.Unmarshal(data, &claudeJSON); err != nil {
-				return fmt.Errorf("parse %s: %w", configPath, err)
-			}
-			email := claudeJSON.OAuthAccount.EmailAddress
-			if email == "" {
-				return fmt.Errorf("no active Claude account found — please log in first")
+			// Read the live Claude identity from .claude.json.
+			identity := readClaudeIdentity()
+			if identity.Email == "" {
+				return fmt.Errorf("no active Claude account found — please log in to Claude first")
 			}
 
 			// Load or create sequence.
@@ -60,16 +44,16 @@ func newAddAccountCmd() *cobra.Command {
 				return err
 			}
 
-			id := account.HashEmail(email)
+			id := account.HashEmail(identity.Email)
 			if _, exists := seq.Accounts[id]; exists {
-				fmt.Printf("Account %s is already managed.\n", email)
+				fmt.Printf("Account %s is already managed.\n", identity.Email)
 				return nil
 			}
 
 			acct := account.Account{
-				Email:       email,
-				AccountUUID: claudeJSON.OAuthAccount.AccountUUID,
-				OrgName:     claudeJSON.OAuthAccount.OrganizationName,
+				Email:       identity.Email,
+				AccountUUID: identity.UUID,
+				OrgName:     identity.Org,
 				AddedAt:     time.Now().UTC().Format(time.RFC3339),
 			}
 			seq.Add(id, acct)
@@ -78,7 +62,7 @@ func newAddAccountCmd() *cobra.Command {
 				return fmt.Errorf("save sequence: %w", err)
 			}
 
-			fmt.Printf("Added account %s: %s\n", id, email)
+			fmt.Printf("Added account %s: %s\n", id, identity.Email)
 			return nil
 		},
 	}

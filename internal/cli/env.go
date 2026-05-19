@@ -1,10 +1,10 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -44,13 +44,16 @@ func newEnvCmd() *cobra.Command {
 
 			// Mode 1: credentials file supplied directly.
 			if credsFile != "" {
-				if _, err := os.Stat(credsFile); err != nil {
-					fmt.Fprintf(os.Stderr, "echo 'Error: Credentials file not found: %s'\n", credsFile)
+				if err := secureCredsFile(credsFile); err != nil {
+					fmt.Fprintf(os.Stderr, "echo 'Error: %v'\n", err)
 					return nil
 				}
 				dir := configDir
 				if dir == "" {
 					dir = filepath.Join(home, ".claude-env-file")
+				}
+				if err := secureDir(dir); err != nil {
+					return err
 				}
 				if err := setupIsolatedDir(dir, sharedDir); err != nil {
 					return err
@@ -88,7 +91,10 @@ func newEnvCmd() *cobra.Command {
 
 			dir := configDir
 			if dir == "" {
-				dir = filepath.Join(home, fmt.Sprintf(".claude-env-%s", id))
+				dir = envDirPath(id)
+			}
+			if err := secureDir(dir); err != nil {
+				return err
 			}
 			if err := setupIsolatedDir(dir, sharedDir); err != nil {
 				return err
@@ -100,7 +106,7 @@ func newEnvCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "echo 'Error: backend not available: %v'\n", err)
 				return nil
 			}
-			ctx := context.Background()
+			ctx := cmd.Context()
 			activeID := seq.ActiveAccountID
 			var credsData []byte
 			if id == activeID {
@@ -128,6 +134,52 @@ func newEnvCmd() *cobra.Command {
 	cmd.Flags().StringVar(&credsFile, "creds-file", "", "Path to a credentials file to use directly")
 	cmd.Flags().StringVar(&configDir, "config-dir", "", "Override the isolated CLAUDE_CONFIG_DIR path")
 	return cmd
+}
+
+// secureDir verifies that an existing path is safe to use as an isolated
+// CLAUDE_CONFIG_DIR: a real directory (not a symlink), owned by the current
+// user, with no group/other permission bits. A non-existent path is fine —
+// the caller creates it 0700. claude reads hooks and runs scripts out of this
+// directory, so an attacker-controlled one would mean code execution with the
+// user's credentials.
+func secureDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing config dir %s: it is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("refusing config dir %s: not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("refusing config dir %s: group/world-accessible (mode %o) — chmod 700 it",
+			dir, fi.Mode().Perm())
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("refusing config dir %s: owned by uid %d, not the current user (uid %d)",
+			dir, st.Uid, os.Getuid())
+	}
+	return nil
+}
+
+// secureCredsFile verifies that a user-supplied --creds-file resolves to a
+// regular file (not a directory, device, or socket). Ownership is not
+// checked — --creds-file exists to point at mounted secrets, which
+// legitimately belong to another uid.
+func secureCredsFile(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("credentials file %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return fmt.Errorf("credentials file %s is not a regular file", path)
+	}
+	return nil
 }
 
 // setupIsolatedDir creates dir and symlinks well-known shared resources from sharedDir.

@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"os"
 
@@ -50,7 +49,7 @@ func newSaveCmd() *cobra.Command {
 				return fmt.Errorf("backend not available: %w", err)
 			}
 
-			ctx := context.Background()
+			ctx := cmd.Context()
 			credsData, err := b.Read(ctx, account.ActiveCredKey)
 			if err != nil {
 				return fmt.Errorf("read active credentials: %w", err)

@@ -71,11 +71,10 @@ func newRefreshAllCmd() *cobra.Command {
 			syncActiveToBackup(ctx, b, seq)
 
 			n, err := refresh.RefreshAll(ctx, seq, b, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
-			if err != nil {
-				return err
-			}
+			// Print the summary either way, then surface any partial-failure
+			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)
-			return nil
+			return err
 		},
 	}
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "Only print warnings and the final summary")

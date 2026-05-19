@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
+	"github.com/zach-source/ccswitch/internal/backend/keychain"
 	"github.com/zach-source/ccswitch/internal/config"
 	"golang.org/x/term"
 )
@@ -49,8 +51,8 @@ func newSetupOpConnectCmd() *cobra.Command {
 			if connectHost == "" {
 				return fmt.Errorf("Connect URL required")
 			}
-			if !strings.HasPrefix(connectHost, "http://") && !strings.HasPrefix(connectHost, "https://") {
-				return fmt.Errorf("URL must start with http:// or https://")
+			if err := validateConnectHost(connectHost); err != nil {
+				return err
 			}
 
 			// CF Access?
@@ -109,15 +111,15 @@ func newSetupOpConnectCmd() *cobra.Command {
 					if ref == "" {
 						ref = refs[i]
 					}
-					// Pipe op read → store without touching argv or files.
+					// op emits the secret on stdout; it never lands in argv.
 					opArgs := append(acctArgs, "read", ref)
-					opCmd := exec.CommandContext(context.Background(), "op", opArgs...)
+					opCmd := exec.CommandContext(cmd.Context(), "op", opArgs...)
 					out, err := opCmd.Output()
 					if err != nil {
 						return fmt.Errorf("op read %s: %w", ref, err)
 					}
 					value := strings.TrimRight(string(out), "\n")
-					if err := storeSecret(spec.service, cfg.OnePassword.ConnectTokenKeychainAccount, spec.file, []byte(value)); err != nil {
+					if err := storeSecret(cmd.Context(), spec.service, spec.file, []byte(value)); err != nil {
 						return fmt.Errorf("store %s: %w", spec.label, err)
 					}
 					fmt.Printf("Stored %s ✓\n", spec.label)
@@ -134,7 +136,7 @@ func newSetupOpConnectCmd() *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("read %s: %w", spec.label, err)
 					}
-					if err := storeSecret(spec.service, cfg.OnePassword.ConnectTokenKeychainAccount, spec.file, value); err != nil {
+					if err := storeSecret(cmd.Context(), spec.service, spec.file, value); err != nil {
 						return fmt.Errorf("store %s: %w", spec.label, err)
 					}
 					fmt.Printf("Stored %s ✓\n", spec.label)
@@ -158,34 +160,28 @@ func newSetupOpConnectCmd() *cobra.Command {
 	}
 }
 
-// storeSecret writes value to macOS Keychain (preferred) or a 0600 file fallback.
-// The value bytes are never passed through OS argv.
-func storeSecret(service, keychainAccount, fileBasename string, value []byte) error {
-	if securityExists() {
-		// Use security(1) write-password approach via a temp file stdin workaround.
-		// security add-generic-password -w accepts the password on the command line
-		// (macOS limitation). Mitigate by using the shorter-lived subprocess.
-		_ = exec.Command("security", "delete-generic-password",
-			"-a", keychainAccount, "-s", service).Run()
-		secCmd := exec.Command("security", "add-generic-password",
-			"-U", "-a", keychainAccount, "-s", service, "-w", string(value), "-T", "/usr/bin/security")
-		if err := secCmd.Run(); err != nil {
+// storeSecret writes value to the macOS Keychain via the keychain backend
+// (Security.framework — no argv exposure), or a 0600 file fallback on
+// platforms where the keychain is unavailable.
+//
+// It deliberately does NOT shell out to `security add-generic-password -w`:
+// that exposes the secret as a process argument visible to any local process
+// via `ps`. The keychain backend's Read path uses the same service key and
+// account, so writer and reader stay consistent.
+func storeSecret(ctx context.Context, service, fileBasename string, value []byte) error {
+	if err := keychain.New().Write(ctx, service, value); err != nil {
+		if !errors.Is(err, keychain.ErrNotSupported) {
 			return fmt.Errorf("keychain write: %w", err)
 		}
-		return nil
+		// Non-macOS: 0600 file fallback.
+		home, _ := os.UserHomeDir()
+		tokenFile := filepath.Join(home, ".config", "ccswitch", fileBasename)
+		if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(tokenFile, value, 0o600)
 	}
-	// File fallback.
-	home, _ := os.UserHomeDir()
-	tokenFile := filepath.Join(home, ".config", "ccswitch", fileBasename)
-	if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(tokenFile, value, 0o600)
-}
-
-func securityExists() bool {
-	_, err := exec.LookPath("security")
-	return err == nil
+	return nil
 }
 
 // patchTOMLConnectHost updates or creates ~/.config/ccswitch/config.toml with

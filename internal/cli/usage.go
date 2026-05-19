@@ -115,8 +115,11 @@ func newUsageCmd() *cobra.Command {
 				return errors.New("ccusage is not installed (npm i -g ccusage)")
 			}
 
-			acctLabel := activeAccountLabel()
-			weeklyLimit := activeWeeklyLimit()
+			seq, err := account.LoadSequence(sequencePath())
+			if err != nil {
+				return err
+			}
+			acctLabel, weeklyLimit := activeAccountInfo(seq)
 
 			fmt.Printf("%sClaude Code Usage%s\n", ansiBold, ansiReset)
 			fmt.Printf("%sAccount:%s %s%s%s\n", ansiDim, ansiReset, ansiCyan, acctLabel, ansiReset)
@@ -186,7 +189,7 @@ func renderWeekly(ctx context.Context, weeklyLimit int64) {
 	this := weeks[len(weeks)-1]
 
 	if weeklyLimit > 0 {
-		pct := minFloat(100, this.TotalTokens/float64(weeklyLimit)*100)
+		pct := min(100, this.TotalTokens/float64(weeklyLimit)*100)
 		c := pctColor(pct)
 		fmt.Printf("  This week:  %s%s %.0f%%%s  (%s / %s)\n",
 			c, renderBar(pct), pct, ansiReset,
@@ -199,7 +202,7 @@ func renderWeekly(ctx context.Context, weeklyLimit int64) {
 	if len(weeks) >= 2 {
 		last := weeks[len(weeks)-2]
 		if weeklyLimit > 0 {
-			pct := minFloat(100, last.TotalTokens/float64(weeklyLimit)*100)
+			pct := min(100, last.TotalTokens/float64(weeklyLimit)*100)
 			c := pctColor(pct)
 			fmt.Printf("  Last week:  %s%s %.0f%%%s  (%s / %s)\n",
 				c, renderBar(pct), pct, ansiReset,
@@ -297,6 +300,11 @@ type oauthSlice struct {
 // collectUsage queries the OAuth usage API for each account, refreshing an
 // expired token once before giving up. progress controls the inline
 // "Querying #id…" status line.
+//
+// Accounts are queried sequentially by design: the per-account progress line
+// must render in order, an expired account may spawn a `claude` refresh
+// subprocess, and the managed-account count is small — so the simplicity is
+// worth more than fanning the queries out.
 func collectUsage(ctx context.Context, b backend.Backend, seq *account.Sequence, buffer time.Duration, progress bool) []accountUsage {
 	out := make([]accountUsage, 0, len(seq.Sequence))
 	active := activeID(seq)
@@ -312,9 +320,13 @@ func collectUsage(ctx context.Context, b backend.Backend, seq *account.Sequence,
 		cred := readAccountCred(ctx, b, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
 			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred); err == nil {
-				// Persist the raw refreshed bytes verbatim — never a
-				// re-marshaled struct, which would drop unmodeled fields.
-				_ = b.Write(ctx, account.BackupCredKey(id, acct.Email), rawFresh)
+				// Cache the refreshed bytes back to the backend (raw, never a
+				// re-marshaled struct). Non-fatal for a read-only query, but a
+				// silent write failure would leave the stale token in place —
+				// so surface it instead of discarding the error.
+				if werr := b.Write(ctx, account.BackupCredKey(id, acct.Email), rawFresh); werr != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s: %v\n", id, werr)
+				}
 				cred = fresh
 			}
 		}
@@ -384,7 +396,9 @@ func fetchOAuthUsage(ctx context.Context, token string) (*oauthUsage, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	// Cap the read: a compromised or misbehaving endpoint must not be able to
+	// OOM the process with an unbounded body. 1 MiB is ample for this JSON.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
 		return nil, err
 	}
@@ -464,19 +478,15 @@ func newSetLimitCmd() *cobra.Command {
 			if id == "" {
 				return errors.New("no active account")
 			}
-			acct, ok := seq.Accounts[id]
-			if !ok {
+			if !seq.SetWeeklyLimit(id, limit) {
 				return errors.New("active account not found in sequence.json")
 			}
-
-			acct.WeeklyTokenLimit = limit
-			seq.Accounts[id] = acct
 			if err := seq.Save(sequencePath()); err != nil {
 				return err
 			}
 
 			fmt.Printf("Set weekly limit for %s to %s tokens (%.0fM)\n",
-				acct.Email, formatWithCommas(limit), float64(limit)/1_000_000)
+				seq.Accounts[id].Email, formatWithCommas(limit), float64(limit)/1_000_000)
 			return nil
 		},
 	}
@@ -507,37 +517,21 @@ func parseTokenLimit(s string) (int64, error) {
 
 // ── shared helpers ────────────────────────────────────────────────────────
 
-// activeAccountLabel returns the active account's "email (org)" label, or
-// "unknown" when nothing is active.
-func activeAccountLabel() string {
+// activeAccountInfo returns the display label ("email (org)") and configured
+// weekly token limit for the account Claude Code is currently logged in to,
+// given an already-loaded sequence. The label is "unknown" when no account is
+// active; the limit is 0 when the live account is not managed by ccswitch
+// (so usage never shows a stale limit from a different account).
+func activeAccountInfo(seq *account.Sequence) (label string, weeklyLimit int64) {
 	email := currentEmail()
 	if email == "" {
-		return "unknown"
+		return "unknown", 0
 	}
-	seq, err := account.LoadSequence(sequencePath())
-	if err != nil {
-		return email
-	}
-	id := account.HashEmail(email)
-	acct, ok := seq.Accounts[id]
+	acct, ok := seq.Accounts[account.HashEmail(email)]
 	if !ok {
-		return email
+		return email, 0
 	}
-	return fmt.Sprintf("%s (%s)", email, displayOrg(acct.OrgName))
-}
-
-// activeWeeklyLimit returns the active account's configured weekly token
-// limit, or 0 when none is set.
-func activeWeeklyLimit() int64 {
-	seq, err := account.LoadSequence(sequencePath())
-	if err != nil {
-		return 0
-	}
-	id := activeID(seq)
-	if id == "" {
-		return 0
-	}
-	return seq.Accounts[id].WeeklyTokenLimit
+	return fmt.Sprintf("%s (%s)", email, displayOrg(acct.OrgName)), acct.WeeklyTokenLimit
 }
 
 // formatWithCommas renders an integer with thousands separators.
@@ -558,12 +552,4 @@ func formatWithCommas(n int64) string {
 		b.WriteString(s[i : i+3])
 	}
 	return b.String()
-}
-
-// minFloat returns the smaller of two float64 values.
-func minFloat(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
 }
