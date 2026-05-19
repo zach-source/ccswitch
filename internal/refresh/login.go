@@ -108,10 +108,12 @@ func LoginRotate(
 		fmt.Println("  - claude will exit on its own when the auth flow completes.")
 		fmt.Println()
 
-		// Snapshot the local active slot before this iteration so we can
-		// detect when claude actually wrote new credentials (vs. user
-		// cancelled the browser flow leaving the slot unchanged).
+		// Snapshot the local active slot AND the wall-clock so we can
+		// distinguish "claude wrote new credentials this iteration" from
+		// "claude wrote nothing" (cancelled login). The wall-clock feeds
+		// the hashed-slot lookup, which filters by modification date.
 		beforeData, _ := local.Read(ctx, account.ActiveCredKey)
+		since := time.Now()
 
 		tmpConfig, err := os.MkdirTemp("", "ccswitch-login-config-*")
 		if err != nil {
@@ -142,7 +144,7 @@ func LoginRotate(
 
 		// LoginRotate does not seed .credentials.json, so any file that
 		// appears at the legacy path came from claude.
-		newData := captureClaudeCredential(ctx, tmpConfig, nil, local, beforeData)
+		newData := captureClaudeCredential(ctx, tmpConfig, nil, local, beforeData, since)
 
 		_ = os.RemoveAll(tmpConfig)
 		_ = os.RemoveAll(tmpWork)
@@ -179,22 +181,32 @@ func LoginRotate(
 	return refreshed, nil
 }
 
+// hashedSlotLookup is implemented by backends that can locate the
+// "Claude Code-credentials-<hash>" keychain item claude 2.x writes when
+// CLAUDE_CONFIG_DIR is set. The keychain backend implements it; other
+// backends do not and are simply skipped by the type assertion below.
+type hashedSlotLookup interface {
+	LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, error)
+}
+
 // captureClaudeCredential returns the raw credential blob that `claude auth
-// login` (interactive or refresh-token) produced. It checks two locations
+// login` (interactive or refresh-token) produced. It tries three locations
 // in order:
 //
-//  1. The legacy file under CLAUDE_CONFIG_DIR. RefreshOne seeds this file
-//     with the existing credential before calling claude — so the helper
-//     also takes seedData, and the file path only "captures" when claude
-//     rewrote it to something different from the seed. Pass nil seedData
-//     from the LoginRotate path (which seeds .claude.json only, not
-//     .credentials.json) — any present file there came from claude.
-//  2. The local backend's active slot — claude 2.x on macOS writes
-//     credentials directly to the keychain regardless of CLAUDE_CONFIG_DIR.
-//     The active-slot read is compared to a pre-run snapshot so an
-//     unchanged slot (cancelled login, no-op refresh) is treated as
-//     "nothing captured" rather than re-storing stale data.
-func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []byte, local backend.Backend, beforeLocal []byte) []byte {
+//  1. The legacy file at "$CLAUDE_CONFIG_DIR/.credentials.json" (older
+//     claude and Linux). RefreshOne seeds this file with the existing
+//     credential before invoking claude, so the helper also takes
+//     seedData; the file path only "captures" when claude rewrote it to
+//     something different. Pass nil seedData from the LoginRotate path,
+//     which never seeds .credentials.json.
+//  2. The local backend's active slot ("Claude Code-credentials"). claude
+//     can write there on macOS when CLAUDE_CONFIG_DIR is not set, or on
+//     Linux into the file the file backend points at. Compared to a
+//     pre-run snapshot so a cancelled login does not re-store stale data.
+//  3. Claude 2.x's per-CLAUDE_CONFIG_DIR hashed keychain slot — service
+//     "Claude Code-credentials-<8hex>". Found by enumeration + a
+//     modification-date filter (since), since the hash is opaque to us.
+func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []byte, local backend.Backend, beforeLocal []byte, since time.Time) []byte {
 	if data, err := os.ReadFile(filepath.Join(tmpConfig, ".credentials.json")); err == nil && len(data) > 0 {
 		if !bytes.Equal(data, seedData) {
 			return data
@@ -203,11 +215,15 @@ func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []b
 	if local == nil {
 		return nil
 	}
-	data, err := local.Read(ctx, account.ActiveCredKey)
-	if err != nil || len(data) == 0 || bytes.Equal(data, beforeLocal) {
-		return nil
+	if data, err := local.Read(ctx, account.ActiveCredKey); err == nil && len(data) > 0 && !bytes.Equal(data, beforeLocal) {
+		return data
 	}
-	return data
+	if lookup, ok := local.(hashedSlotLookup); ok {
+		if data, err := lookup.LookupHashedActiveSlot(ctx, since); err == nil && len(data) > 0 {
+			return data
+		}
+	}
+	return nil
 }
 
 func separator() string {
