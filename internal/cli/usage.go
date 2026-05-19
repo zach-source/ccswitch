@@ -272,8 +272,17 @@ func newUsageAllCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
+			// claude 2.x on macOS refreshes expired tokens into the local
+			// keychain, not via CLAUDE_CONFIG_DIR. Pass the local backend
+			// so RefreshOne can capture from the active slot when needed.
+			localCfg := *cfg
+			localCfg.Backend = autoLocalBackend()
+			local, err := resolveBackend(&localCfg)
+			if err != nil {
+				return fmt.Errorf("local backend not available: %w", err)
+			}
 
-			results := collectUsage(cmd.Context(), b, seq, cfg.Refresh.ExpiryBuffer, !jsonOut)
+			results := collectUsage(cmd.Context(), b, local, seq, cfg.Refresh.ExpiryBuffer, !jsonOut)
 
 			if jsonOut {
 				return json.NewEncoder(os.Stdout).Encode(map[string]any{"accounts": results})
@@ -310,7 +319,7 @@ type oauthSlice struct {
 // must render in order, an expired account may spawn a `claude` refresh
 // subprocess, and the managed-account count is small — so the simplicity is
 // worth more than fanning the queries out.
-func collectUsage(ctx context.Context, b backend.Backend, seq *account.Sequence, buffer time.Duration, progress bool) []accountUsage {
+func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend, seq *account.Sequence, buffer time.Duration, progress bool) []accountUsage {
 	out := make([]accountUsage, 0, len(seq.Sequence))
 	active := activeID(seq)
 
@@ -324,7 +333,7 @@ func collectUsage(ctx context.Context, b backend.Backend, seq *account.Sequence,
 
 		cred := readAccountCred(ctx, b, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
-			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred); err == nil {
+			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred, local); err == nil {
 				// Cache the refreshed bytes back to the backend (raw, never a
 				// re-marshaled struct). Non-fatal for a read-only query, but a
 				// silent write failure would leave the stale token in place —
