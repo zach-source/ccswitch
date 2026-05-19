@@ -29,49 +29,56 @@ const seedJSON = `{"hasCompletedOnboarding":true}`
 
 // RefreshOne exchanges the refresh token in cred for a fresh credential blob.
 //
+// It returns the credential file's *raw bytes* exactly as `claude auth login`
+// wrote them, alongside a parsed view for inspection. Callers must persist the
+// raw bytes — never re-marshal the parsed struct — so that any field the
+// struct does not model (future additions to .credentials.json) is preserved.
+//
 // Strategy (mirrors _refresh_via_claude_auth in ccswitch.sh):
 //  1. Create an isolated CLAUDE_CONFIG_DIR (tmpdir).
 //  2. Seed it with the existing credential blob and a stub .claude.json.
 //  3. Run `claude auth login` with the refresh token in the environment.
-//  4. Wait for .credentials.json to be (re-)written, parse it, return it.
+//  4. Read back the (re-)written .credentials.json — raw — and parse it.
 //  5. Clean up tmpdirs on exit regardless of success.
-func RefreshOne(ctx context.Context, cred *credentials.Credentials) (*credentials.Credentials, error) {
+func RefreshOne(ctx context.Context, cred *credentials.Credentials) ([]byte, *credentials.Credentials, error) {
 	refreshToken := cred.ClaudeAIOAuth.RefreshToken
 	if refreshToken == "" {
-		return nil, errors.New("refresh: no refresh token present in credentials")
+		return nil, nil, errors.New("refresh: no refresh token present in credentials")
 	}
 
 	// Isolated config dir — never touches the active keychain/session.
 	tmpConfig, err := os.MkdirTemp("", "ccswitch-refresh-config-*")
 	if err != nil {
-		return nil, fmt.Errorf("refresh: create config tmpdir: %w", err)
+		return nil, nil, fmt.Errorf("refresh: create config tmpdir: %w", err)
 	}
 	tmpWork, err := os.MkdirTemp("", "ccswitch-refresh-work-*")
 	if err != nil {
 		_ = os.RemoveAll(tmpConfig)
-		return nil, fmt.Errorf("refresh: create work tmpdir: %w", err)
+		return nil, nil, fmt.Errorf("refresh: create work tmpdir: %w", err)
 	}
 	defer func() {
 		_ = os.RemoveAll(tmpConfig)
 		_ = os.RemoveAll(tmpWork)
 	}()
 
-	// Seed credentials so claude can read the existing token.
+	// Seed credentials so claude can read the existing token. This seed is
+	// a throwaway — `claude auth login` overwrites credFile, and step 4
+	// reads back that overwritten file — so re-marshaling here is harmless.
 	credData, err := cred.Marshal()
 	if err != nil {
-		return nil, fmt.Errorf("refresh: marshal existing cred: %w", err)
+		return nil, nil, fmt.Errorf("refresh: marshal existing cred: %w", err)
 	}
 	credFile := filepath.Join(tmpConfig, ".credentials.json")
 	if err := os.WriteFile(credFile, credData, 0o600); err != nil {
-		return nil, fmt.Errorf("refresh: seed credentials: %w", err)
+		return nil, nil, fmt.Errorf("refresh: seed credentials: %w", err)
 	}
 	if err := os.WriteFile(filepath.Join(tmpConfig, ".claude.json"), []byte(seedJSON), 0o600); err != nil {
-		return nil, fmt.Errorf("refresh: seed claude.json: %w", err)
+		return nil, nil, fmt.Errorf("refresh: seed claude.json: %w", err)
 	}
 
 	claudePath, err := exec.LookPath("claude")
 	if err != nil {
-		return nil, fmt.Errorf("refresh: claude CLI not found in PATH: %w", err)
+		return nil, nil, fmt.Errorf("refresh: claude CLI not found in PATH: %w", err)
 	}
 
 	cmd := exec.CommandContext(ctx, claudePath, "auth", "login")
@@ -86,19 +93,20 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials) (*credential
 	)
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("refresh: claude auth login: %w", err)
+		return nil, nil, fmt.Errorf("refresh: claude auth login: %w", err)
 	}
 
-	// Read the freshly written credentials.
+	// Read the freshly written credentials as raw bytes — this is what gets
+	// persisted, byte-for-byte. The parse is only an inspection lens.
 	newData, err := os.ReadFile(credFile)
 	if err != nil {
-		return nil, fmt.Errorf("refresh: read refreshed credentials: %w", err)
+		return nil, nil, fmt.Errorf("refresh: read refreshed credentials: %w", err)
 	}
 	newCred, err := credentials.Parse(newData)
 	if err != nil {
-		return nil, fmt.Errorf("refresh: parse refreshed credentials: %w", err)
+		return nil, nil, fmt.Errorf("refresh: parse refreshed credentials: %w", err)
 	}
-	return newCred, nil
+	return newData, newCred, nil
 }
 
 // RefreshAll iterates every account in seq, refreshes those whose credentials
@@ -146,17 +154,13 @@ func RefreshAll(
 		}
 
 		log.Info("refresh-all: refreshing", "id", id, "email", acct.Email)
-		newCred, err := RefreshOne(ctx, cred)
+		newData, newCred, err := RefreshOne(ctx, cred)
 		if err != nil {
 			log.Error("refresh-all: refresh failed", "id", id, "err", err)
 			continue
 		}
 
-		newData, err := newCred.Marshal()
-		if err != nil {
-			log.Error("refresh-all: marshal failed", "id", id, "err", err)
-			continue
-		}
+		// Persist the raw credential bytes verbatim — no struct round-trip.
 		if err := b.Write(ctx, key, newData); err != nil {
 			log.Error("refresh-all: write failed", "id", id, "err", err)
 			continue

@@ -37,6 +37,12 @@ func Parse(data []byte) (*Credentials, error) {
 }
 
 // Marshal serializes a credential blob to compact JSON.
+//
+// WARNING: this is lossy. Credentials is a typed inspection lens, not a
+// faithful mirror of .credentials.json — any field Claude Code writes that
+// this struct does not model is dropped. Never persist Marshal output as a
+// stored credential; write the original raw bytes instead. Marshal is safe
+// only for throwaway uses (e.g. seeding a tmpdir that will be overwritten).
 func (c *Credentials) Marshal() ([]byte, error) {
 	return json.Marshal(c)
 }

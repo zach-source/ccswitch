@@ -311,10 +311,10 @@ func collectUsage(ctx context.Context, b backend.Backend, seq *account.Sequence,
 
 		cred := readAccountCred(ctx, b, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
-			if fresh, err := refresh.RefreshOne(ctx, cred); err == nil {
-				if data, mErr := fresh.Marshal(); mErr == nil {
-					_ = b.Write(ctx, account.BackupCredKey(id, acct.Email), data)
-				}
+			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred); err == nil {
+				// Persist the raw refreshed bytes verbatim — never a
+				// re-marshaled struct, which would drop unmodeled fields.
+				_ = b.Write(ctx, account.BackupCredKey(id, acct.Email), rawFresh)
 				cred = fresh
 			}
 		}

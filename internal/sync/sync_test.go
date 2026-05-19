@@ -1,6 +1,7 @@
 package sync_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"testing"
@@ -294,5 +295,36 @@ func TestSync_ActiveSlot_PullMirrorsBoth(t *testing.T) {
 	backupCred := readCred(t, local, id, email)
 	if backupCred.ClaudeAIOAuth.ExpiresAtMillis != exp {
 		t.Errorf("backup slot expiresAt: want %d got %d", exp, backupCred.ClaudeAIOAuth.ExpiresAtMillis)
+	}
+}
+
+// TestSync_PreservesRawCredentialBytes verifies that a credential blob is
+// stored byte-for-byte through a sync pass — including a top-level field the
+// credentials.Credentials struct does not model. Any struct round-trip in the
+// pipeline would silently drop it; this test guards against that regression.
+func TestSync_PreservesRawCredentialBytes(t *testing.T) {
+	local := inmem.New()
+	remote := inmem.New()
+	seq := makeSeq("aa11bb22")
+	email := seq.Accounts["aa11bb22"].Email
+
+	// Raw blob with an unmodeled "futureField"; far-future expiresAt so the
+	// local copy is the fresher side and gets pushed to remote.
+	raw := []byte(`{"claudeAiOauth":{"accessToken":"a","refreshToken":"r",` +
+		`"expiresAt":9999999999999},"futureField":"keep-me"}`)
+	if err := local.Write(context.Background(), credKey("aa11bb22", email), raw); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := newEngine(local, remote, seq).Run(context.Background()); err != nil {
+		t.Fatalf("sync run: %v", err)
+	}
+
+	got, err := remote.Read(context.Background(), credKey("aa11bb22", email))
+	if err != nil {
+		t.Fatalf("read remote: %v", err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("sync altered the credential blob:\n  want %s\n   got %s", raw, got)
 	}
 }
