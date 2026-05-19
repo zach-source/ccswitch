@@ -2,8 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,7 +10,6 @@ import (
 
 	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
-	"github.com/zach-source/ccswitch/internal/backend/keychain"
 	"github.com/zach-source/ccswitch/internal/config"
 	"golang.org/x/term"
 )
@@ -119,7 +116,7 @@ func newSetupOpConnectCmd() *cobra.Command {
 						return fmt.Errorf("op read %s: %w", ref, err)
 					}
 					value := strings.TrimRight(string(out), "\n")
-					if err := storeSecret(cmd.Context(), spec.service, spec.file, []byte(value)); err != nil {
+					if err := storeSecret(spec.service, spec.file, []byte(value)); err != nil {
 						return fmt.Errorf("store %s: %w", spec.label, err)
 					}
 					fmt.Printf("Stored %s ✓\n", spec.label)
@@ -136,14 +133,15 @@ func newSetupOpConnectCmd() *cobra.Command {
 					if err != nil {
 						return fmt.Errorf("read %s: %w", spec.label, err)
 					}
-					if err := storeSecret(cmd.Context(), spec.service, spec.file, value); err != nil {
+					if err := storeSecret(spec.service, spec.file, value); err != nil {
 						return fmt.Errorf("store %s: %w", spec.label, err)
 					}
 					fmt.Printf("Stored %s ✓\n", spec.label)
 				}
 			}
 
-			fmt.Println("Secrets stored.")
+			home, _ := os.UserHomeDir()
+			fmt.Printf("Secrets stored under %s/.config/ccswitch/ (mode 0600).\n", home)
 
 			// Update TOML config with connect_host.
 			if err := patchTOMLConnectHost(config.DefaultPath(), connectHost,
@@ -160,28 +158,29 @@ func newSetupOpConnectCmd() *cobra.Command {
 	}
 }
 
-// storeSecret writes value to the macOS Keychain via the keychain backend
-// (Security.framework — no argv exposure), or a 0600 file fallback on
-// platforms where the keychain is unavailable.
+// storeSecret writes value to a 0600 file under ~/.config/ccswitch/.
 //
-// It deliberately does NOT shell out to `security add-generic-password -w`:
-// that exposes the secret as a process argument visible to any local process
-// via `ps`. The keychain backend's Read path uses the same service key and
-// account, so writer and reader stay consistent.
-func storeSecret(ctx context.Context, service, fileBasename string, value []byte) error {
-	if err := keychain.New().Write(ctx, service, value); err != nil {
-		if !errors.Is(err, keychain.ErrNotSupported) {
-			return fmt.Errorf("keychain write: %w", err)
-		}
-		// Non-macOS: 0600 file fallback.
-		home, _ := os.UserHomeDir()
-		tokenFile := filepath.Join(home, ".config", "ccswitch", fileBasename)
-		if err := os.MkdirAll(filepath.Dir(tokenFile), 0o700); err != nil {
-			return err
-		}
-		return os.WriteFile(tokenFile, value, 0o600)
+// The previous keychain-backed implementation hit a structural problem on
+// macOS: keychain ACLs match the calling binary's code identity, and Nix
+// builds ccswitch into a new content-addressed /nix/store/<hash>/ccswitch
+// each rebuild. Every rebuild made the keychain treat us as a "different
+// app" and re-prompted the user — every five minutes for the launchd
+// sync daemon, every time we shipped a new build for everything else.
+//
+// File storage avoids that without weakening the security posture: the
+// file is 0600 user-only, parent dir 0700, never written through argv
+// (which is what the original Critical security fix was about).
+func storeSecret(service, fileBasename string, value []byte) error {
+	_ = service // retained for callers' clarity; not used for the file path
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
 	}
-	return nil
+	path := filepath.Join(home, ".config", "ccswitch", fileBasename)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, value, 0o600)
 }
 
 // patchTOMLConnectHost updates or creates ~/.config/ccswitch/config.toml with
