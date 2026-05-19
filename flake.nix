@@ -16,36 +16,28 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        version = "1.0.0";
+        version = "2.0.0";
       in
       {
         packages = {
           default = self.packages.${system}.ccswitch;
 
-          ccswitch = pkgs.stdenv.mkDerivation {
+          # ccswitch is a pure-Go CLI as of v2.0.0 (rewritten from the v1.x
+          # bash script). Runtime tools it shells out to — `claude`,
+          # `ccusage`, `op` — are resolved from the user's PATH on demand,
+          # so the binary is not wrapped.
+          ccswitch = pkgs.buildGoModule {
             pname = "ccswitch";
             inherit version;
             src = self;
 
-            nativeBuildInputs = [ pkgs.makeWrapper ];
+            vendorHash = "sha256-Cts3oaKQC8LXFMQrT8IvFYnEmgJBSPc2l1kMN1nmCzM=";
 
-            dontBuild = true;
-
-            installPhase = ''
-              runHook preInstall
-              install -Dm755 ccswitch.sh $out/bin/ccswitch
-              wrapProgram $out/bin/ccswitch \
-                --prefix PATH : ${
-                  pkgs.lib.makeBinPath [
-                    pkgs.bash
-                    pkgs.coreutils
-                    pkgs.curl
-                    pkgs.jq
-                    pkgs.python3
-                  ]
-                }
-              runHook postInstall
-            '';
+            subPackages = [ "cmd/ccswitch" ];
+            ldflags = [
+              "-s"
+              "-w"
+            ];
 
             meta = with pkgs.lib; {
               description = "Multi-account switcher and usage monitor for Claude Code";
@@ -61,6 +53,14 @@
         apps.default = {
           type = "app";
           program = "${self.packages.${system}.ccswitch}/bin/ccswitch";
+        };
+
+        # `nix develop` — toolchain for `make conformance` (Go + bats).
+        devShells.default = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.bats
+          ];
         };
       }
     )
