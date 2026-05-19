@@ -50,41 +50,69 @@ make install
 
 ```
 Account Management:
-  ccswitch --add-account               Add current account to managed accounts
-  ccswitch --remove-account <N|email>  Remove account
-  ccswitch --current                   Show current active account
-  ccswitch --list                      List all managed accounts
-  ccswitch --switch                    Rotate to next account
-  ccswitch --switch-to <N|email>       Switch to specific account
+  ccswitch add-account                Add current account to managed accounts
+  ccswitch remove-account <N|email>   Remove an account
+  ccswitch current                    Show the current active account
+  ccswitch list                       List all managed accounts
+  ccswitch switch                     Pick an account interactively
+  ccswitch switch-to <N|email>        Switch to a specific account
+  ccswitch login [--only X] [--force] Re-authenticate expired accounts
+  ccswitch refresh-all                Refresh expired OAuth tokens
 
 Usage Monitoring:
-  ccswitch --usage                     Show 5h block and weekly usage (active account)
-  ccswitch --usage-all                 Show real usage for ALL accounts via API
-  ccswitch --set-limit <tokens>        Set weekly token limit (e.g. 6700M)
+  ccswitch usage                      Show 5h block and weekly usage (active account)
+  ccswitch usage-all [--json]         Show real usage for ALL accounts via API
+  ccswitch set-limit <tokens>         Set weekly token limit (e.g. 6700M)
 
 API Configuration:
-  ccswitch --use-zai                   Switch to z.ai API endpoint
-  ccswitch --use-anthropic             Revert to default Anthropic API
-  ccswitch --api-status                Show current API configuration
+  ccswitch use-zai                    Switch to the z.ai API endpoint
+  ccswitch use-anthropic              Revert to the default Anthropic API
+  ccswitch api-status                 Show current API configuration
+
+Sync & Config:
+  ccswitch sync [--quiet]             Bi-directional 1Password sync
+  ccswitch daemon                     Run the sync loop continuously
+  ccswitch config                     Print effective configuration
 ```
+
+Every subcommand also accepts the legacy double-dashed form
+(`ccswitch --switch-to 2`) so existing scripts and integrations keep working.
 
 ## How It Works
 
 ### Account Switching
-ccswitch stores OAuth credentials per account in the macOS Keychain (or `~/.claude/.credentials.json` on Linux). When switching, it swaps the active credentials and updates `~/.claude.json`.
+ccswitch stores OAuth credentials per account in the macOS Keychain (or a
+credentials file on Linux/WSL). When switching, it swaps the active
+credentials and records the change. The "currently active" account is read
+from `~/.claude.json` — the live source of truth — so ccswitch stays correct
+even when you log in through `claude` directly.
 
 ### Usage Monitoring
-`--usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for each account using stored tokens — no switching required. Returns real server-side 5h and 7d utilization percentages.
+`usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for
+each account using stored tokens — no switching required. It returns real
+server-side 5h and 7d utilization percentages.
 
-`--usage` shows detailed stats for the active account including 5h block breakdown via `ccusage`.
+`usage` shows detailed stats for the active account, including the 5h block
+breakdown, via `ccusage`.
 
 ## Requirements
 
-- bash 4.0+
-- jq
-- curl
-- python3
-- macOS (Keychain) or Linux/WSL
+ccswitch is a single self-contained Go binary. It shells out to a few tools
+only when the relevant feature is used:
+
+- `claude` — for `login` / `refresh-all` (OAuth token refresh)
+- `ccusage` — for `usage` (local block/weekly stats)
+- `op` — for `use-zai` (z.ai token retrieval from 1Password)
+- `fzf` — optional, for the interactive `switch` picker
+- macOS (Keychain) or Linux/WSL (credentials file)
+
+## Development
+
+```bash
+make build    # compile ./bin/ccswitch
+make check    # go vet + unit tests
+make smoke    # bats CLI smoke tests against the built binary
+```
 
 ## License
 

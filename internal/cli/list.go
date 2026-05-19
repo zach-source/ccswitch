@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -29,23 +28,13 @@ func newListCmd() *cobra.Command {
 			}
 
 			// Determine who is actually active right now from .claude.json.
-			activeEmail := currentEmail()
-			activeID := ""
-			if activeEmail != "" {
-				activeID = account.HashEmail(activeEmail)
-			}
+			active := activeID(seq)
 
 			fmt.Println("Accounts:")
 			for _, id := range seq.Sequence {
 				acct := seq.Accounts[id]
-				org := acct.OrgName
-				if strings.HasSuffix(org, "'s Organization") {
-					org = "Personal"
-				}
-				if org == "" {
-					org = "Unknown"
-				}
-				if id == activeID {
+				org := displayOrg(acct.OrgName)
+				if id == active {
 					fmt.Printf("  %s  %s  [%s] (active)\n", id, acct.Email, org)
 				} else {
 					fmt.Printf("  %s  %s  [%s]\n", id, acct.Email, org)

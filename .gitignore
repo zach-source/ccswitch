@@ -1,0 +1,8 @@
+# Build artifacts
+/bin/
+/result
+/result-*
+
+# Go test/coverage output
+*.out
+*.test

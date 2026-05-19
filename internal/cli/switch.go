@@ -79,21 +79,15 @@ func newSwitchToCmd() *cobra.Command {
 // pickAccountInteractive shows an fzf picker when fzf is on PATH, otherwise a
 // numbered text prompt.
 func pickAccountInteractive(seq *account.Sequence) (string, error) {
+	active := activeID(seq)
 	lines := make([]string, len(seq.Sequence))
 	for i, id := range seq.Sequence {
 		acct := seq.Accounts[id]
-		org := acct.OrgName
-		if strings.HasSuffix(org, "'s Organization") {
-			org = "Personal"
-		}
-		if org == "" {
-			org = "Unknown"
-		}
 		marker := ""
-		if id == seq.ActiveAccountID {
+		if id == active {
 			marker = " (active)"
 		}
-		lines[i] = fmt.Sprintf("%s  %s  [%s]%s", id, acct.Email, org, marker)
+		lines[i] = fmt.Sprintf("%s  %s  [%s]%s", id, acct.Email, displayOrg(acct.OrgName), marker)
 	}
 
 	if _, err := exec.LookPath("fzf"); err == nil {
@@ -178,11 +172,16 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	}
 
 	// 2. Snapshot prior active into its backup slot (best-effort).
-	if seq.ActiveAccountID != "" && seq.ActiveAccountID != targetID {
-		if cur, ok := seq.Accounts[seq.ActiveAccountID]; ok {
+	// The prior-active account is taken from the live .claude.json, not
+	// sequence.json's recorded activeAccountId — the recorded value can be
+	// stale, and snapshotting the active slot under the wrong account's
+	// backup key would file the credentials against the wrong identity.
+	priorID := activeID(seq)
+	if priorID != "" && priorID != targetID {
+		if cur, ok := seq.Accounts[priorID]; ok {
 			data, rerr := local.Read(ctx, account.ActiveCredKey)
 			if rerr == nil && len(data) > 0 {
-				if werr := local.Write(ctx, account.BackupCredKey(seq.ActiveAccountID, cur.Email), data); werr != nil {
+				if werr := local.Write(ctx, account.BackupCredKey(priorID, cur.Email), data); werr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
 				}
 			} else if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {

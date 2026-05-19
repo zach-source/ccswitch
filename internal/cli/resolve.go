@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
+	"github.com/zach-source/ccswitch/internal/account"
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/backend/file"
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
@@ -14,6 +16,36 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend/vault"
 	"github.com/zach-source/ccswitch/internal/config"
 )
+
+// displayOrg normalizes an account's stored organization name for display.
+// Claude names personal-account orgs "<name>'s Organization"; that form and
+// the empty string both render as "Personal".
+func displayOrg(org string) string {
+	if org == "" || strings.HasSuffix(org, "'s Organization") {
+		return "Personal"
+	}
+	return org
+}
+
+// activeID returns the ID of the account currently logged in to Claude Code.
+// The live source of truth is ~/.claude/.claude.json, not sequence.json's
+// activeAccountId field — that recorded value goes stale whenever the user
+// logs in/out through `claude` directly without going through `ccswitch
+// switch`. The recorded field is used only as a fallback when .claude.json
+// has no usable account, or names one ccswitch does not manage.
+func activeID(seq *account.Sequence) string {
+	if seq == nil {
+		return ""
+	}
+	if email := currentEmail(); email != "" {
+		if id := account.HashEmail(email); id != "" {
+			if _, ok := seq.Accounts[id]; ok {
+				return id
+			}
+		}
+	}
+	return seq.ActiveAccountID
+}
 
 // resolveBackend returns the Backend implementation for the effective type.
 // "auto" picks keychain on macOS, file elsewhere.

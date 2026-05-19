@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -35,14 +34,7 @@ func newCurrentCmd() *cobra.Command {
 				return nil
 			}
 			email := claudeJSON.OAuthAccount.EmailAddress
-			org := claudeJSON.OAuthAccount.OrganizationName
-			if strings.HasSuffix(org, "'s Organization") {
-				org = "Personal"
-			}
-			if org == "" {
-				org = "Personal"
-			}
-			fmt.Printf("%s (%s)\n", email, org)
+			fmt.Printf("%s (%s)\n", email, displayOrg(claudeJSON.OAuthAccount.OrganizationName))
 			return nil
 		},
 	}

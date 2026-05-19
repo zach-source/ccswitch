@@ -25,10 +25,11 @@ func HashEmail(email string) string {
 
 // Account is one entry in sequence.json.
 type Account struct {
-	Email       string `json:"email"`
-	OrgName     string `json:"orgName,omitempty"`
-	AccountUUID string `json:"accountUuid,omitempty"`
-	AddedAt     string `json:"addedAt,omitempty"`
+	Email            string `json:"email"`
+	OrgName          string `json:"orgName,omitempty"`
+	AccountUUID      string `json:"accountUuid,omitempty"`
+	AddedAt          string `json:"addedAt,omitempty"`
+	WeeklyTokenLimit int64  `json:"weeklyTokenLimit,omitempty"`
 }
 
 // Sequence is the on-disk sequence.json format (v2 — hash-based IDs).
