@@ -249,3 +249,108 @@ func TestPatchTOMLConnectHost(t *testing.T) {
 		t.Errorf("connect host = %q, want https://op.example.com", cfg.OnePassword.ConnectHost)
 	}
 }
+
+// ─── login / refresh-all: claude 2.x keychain capture ──────────────────────
+//
+// On macOS, claude 2.x writes credentials to the OS keychain regardless of
+// CLAUDE_CONFIG_DIR. The harness's CCSWITCH_LOCAL_BACKEND=file points the
+// "local active slot" at the file backend, so a fake `claude` that writes
+// to the active-slot file simulates the keychain behavior.
+
+// activeSlotFile returns the file-backend path of the active credential
+// slot under home. Mirrors file.Backend.keyToPath for the active key.
+func activeSlotFile(home string) string {
+	return filepath.Join(home, ".claude-switch-backup", "credentials",
+		".Claude Code-credentials.json")
+}
+
+// fakeClaudeWritingToActiveSlot returns a fake `claude` script that writes
+// credBody to the local active slot — the file the file backend uses for
+// the ActiveCredKey — instead of $CLAUDE_CONFIG_DIR/.credentials.json.
+// This exercises the macOS-keychain-equivalent code path in
+// captureClaudeCredential.
+func fakeClaudeWritingToActiveSlot(credBody string) string {
+	return `mkdir -p "$HOME/.claude-switch-backup/credentials"
+cat > "$HOME/.claude-switch-backup/credentials/.Claude Code-credentials.json" <<'CRED'
+` + credBody + `
+CRED
+`
+}
+
+func TestLogin_CapturesFromLocalActiveSlot(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+	// No backup credential — alice needs login.
+
+	// Simulate claude 2.x on macOS: writes to the keychain (= local active
+	// slot under CCSWITCH_LOCAL_BACKEND=file), not to $CLAUDE_CONFIG_DIR.
+	fakeBin(t, bins, "claude", fakeClaudeWritingToActiveSlot(
+		`{"claudeAiOauth":{"accessToken":"keychain-style-AT","refreshToken":"li-RT","expiresAt":99999999999999}}`))
+
+	if _, err := capture(t, func() error { return run(t, "login") }); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
+	if !strings.Contains(got, "keychain-style-AT") {
+		t.Fatalf("login did not capture from the local active slot:\n%s", got)
+	}
+}
+
+func TestLogin_NoCredsWhenClaudeWritesNothing(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	// fake claude is a no-op — simulates the user cancelling the browser
+	// flow before authorizing. The local active slot is unchanged and the
+	// legacy file path is empty: capture must return nothing.
+	fakeBin(t, bins, "claude", `:`)
+
+	if _, err := capture(t, func() error { return run(t, "login") }); err != nil {
+		t.Fatalf("login: %v", err)
+	}
+	if got := readCred(t, home, account.BackupCredKey(aliceID, alice)); len(got) != 0 {
+		t.Fatalf("login stored creds despite claude writing nothing:\n%s", got)
+	}
+}
+
+func TestRefreshAll_CapturesFromLocalActiveSlot(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	// fake claude writes to the local active slot (macOS-keychain
+	// equivalent) AND carries an unmodeled field, so this test also
+	// regresses the raw-bytes persistence rule.
+	fakeBin(t, bins, "claude", fakeClaudeWritingToActiveSlot(
+		`{"claudeAiOauth":{"accessToken":"fresh-via-keychain","refreshToken":"fresh-RT","expiresAt":99999999999999},"futureField":"preserved"}`))
+
+	// An expired backup credential so refresh-all takes the refresh branch.
+	expired := []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1}}`)
+	seedCred(t, home, account.BackupCredKey(aliceID, alice), expired)
+
+	if err := run(t, "refresh-all"); err != nil {
+		t.Fatalf("refresh-all: %v", err)
+	}
+	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
+	if !strings.Contains(got, "fresh-via-keychain") {
+		t.Fatalf("refresh-all did not capture from the local active slot:\n%s", got)
+	}
+	if !strings.Contains(got, "futureField") {
+		t.Fatalf("refresh dropped an unmodeled field — data loss:\n%s", got)
+	}
+	// Sanity: the helper resolves the same path the local backend uses.
+	if _, err := os.Stat(activeSlotFile(home)); err != nil {
+		t.Errorf("active slot file expected at %s: %v", activeSlotFile(home), err)
+	}
+}

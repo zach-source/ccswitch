@@ -61,6 +61,16 @@ func newRefreshAllCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
+			// claude 2.x on macOS writes refreshed credentials to the local
+			// keychain, not to CLAUDE_CONFIG_DIR. RefreshOne captures from
+			// the local active slot when the file is absent, so the local
+			// backend has to be passed in.
+			localCfg := *cfg
+			localCfg.Backend = autoLocalBackend()
+			local, err := resolveBackend(&localCfg)
+			if err != nil {
+				return fmt.Errorf("local backend not available: %w", err)
+			}
 
 			ctx := cmd.Context()
 
@@ -69,7 +79,7 @@ func newRefreshAllCmd() *cobra.Command {
 			// active account is never reported as stale.
 			syncActiveToBackup(ctx, b, seq)
 
-			n, err := refresh.RefreshAll(ctx, seq, b, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
+			n, err := refresh.RefreshAll(ctx, seq, b, local, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
 			// Print the summary either way, then surface any partial-failure
 			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)
@@ -104,6 +114,16 @@ func newLoginCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
+			// claude 2.x on macOS writes credentials to the login keychain,
+			// not a file under CLAUDE_CONFIG_DIR. LoginRotate captures from
+			// the local backend's active slot when the legacy file is
+			// absent, so the local backend has to be passed in.
+			localCfg := *cfg
+			localCfg.Backend = autoLocalBackend()
+			local, err := resolveBackend(&localCfg)
+			if err != nil {
+				return fmt.Errorf("local backend not available: %w", err)
+			}
 
 			// --only narrows the sequence to a single account.
 			target := seq
@@ -117,7 +137,7 @@ func newLoginCmd() *cobra.Command {
 				target = &narrowed
 			}
 
-			_, err = refresh.LoginRotate(cmd.Context(), target, b,
+			_, err = refresh.LoginRotate(cmd.Context(), target, b, local,
 				cfg.Refresh.ExpiryBuffer, force, cliLogger(false))
 			return err
 		},

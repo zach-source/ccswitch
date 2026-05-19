@@ -34,13 +34,21 @@ const seedJSON = `{"hasCompletedOnboarding":true}`
 // raw bytes — never re-marshal the parsed struct — so that any field the
 // struct does not model (future additions to .credentials.json) is preserved.
 //
-// Strategy (mirrors _refresh_via_claude_auth in ccswitch.sh):
+// local is the active-slot backend (keychain on macOS, file elsewhere). On
+// macOS, claude 2.x writes the refreshed credential directly to the keychain
+// regardless of CLAUDE_CONFIG_DIR; RefreshOne reads from local as a fallback
+// when the legacy file is absent. A nil local disables the fallback (mostly
+// useful for tests on Linux paths).
+//
+// Strategy:
 //  1. Create an isolated CLAUDE_CONFIG_DIR (tmpdir).
 //  2. Seed it with the existing credential blob and a stub .claude.json.
-//  3. Run `claude auth login` with the refresh token in the environment.
-//  4. Read back the (re-)written .credentials.json — raw — and parse it.
-//  5. Clean up tmpdirs on exit regardless of success.
-func RefreshOne(ctx context.Context, cred *credentials.Credentials) ([]byte, *credentials.Credentials, error) {
+//  3. Snapshot local's active slot so we can detect "claude updated it".
+//  4. Run `claude auth login` with the refresh token in the environment.
+//  5. Read $CLAUDE_CONFIG_DIR/.credentials.json — raw — if present;
+//     otherwise read local's active slot and compare to the snapshot.
+//  6. Clean up tmpdirs on exit regardless of success.
+func RefreshOne(ctx context.Context, cred *credentials.Credentials, local backend.Backend) ([]byte, *credentials.Credentials, error) {
 	refreshToken := cred.ClaudeAIOAuth.RefreshToken
 	if refreshToken == "" {
 		return nil, nil, errors.New("refresh: no refresh token present in credentials")
@@ -92,15 +100,25 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials) ([]byte, *cr
 		"CLAUDE_CODE_OAUTH_SCOPES="+oauthScopes,
 	)
 
+	// Snapshot the local active slot so a post-run change can be attributed
+	// to claude (rather than re-reading a stale prior value as if it were
+	// fresh). The legacy file path is preferred when present.
+	var beforeActive []byte
+	if local != nil {
+		beforeActive, _ = local.Read(ctx, account.ActiveCredKey)
+	}
+
 	if err := cmd.Run(); err != nil {
 		return nil, nil, fmt.Errorf("refresh: claude auth login: %w", err)
 	}
 
-	// Read the freshly written credentials as raw bytes — this is what gets
-	// persisted, byte-for-byte. The parse is only an inspection lens.
-	newData, err := os.ReadFile(credFile)
-	if err != nil {
-		return nil, nil, fmt.Errorf("refresh: read refreshed credentials: %w", err)
+	// Capture the raw bytes — this is what gets persisted verbatim. The
+	// parse below is only an inspection lens. credData (the seed we wrote
+	// to credFile above) lets capture distinguish "claude rewrote the
+	// file" from "the seed is still there."
+	newData := captureClaudeCredential(ctx, tmpConfig, credData, local, beforeActive)
+	if len(newData) == 0 {
+		return nil, nil, fmt.Errorf("refresh: claude auth login did not produce credentials")
 	}
 	newCred, err := credentials.Parse(newData)
 	if err != nil {
@@ -121,6 +139,7 @@ func RefreshAll(
 	ctx context.Context,
 	seq *account.Sequence,
 	b backend.Backend,
+	local backend.Backend,
 	expiryBuffer time.Duration,
 	log *slog.Logger,
 ) (int, error) {
@@ -161,7 +180,7 @@ func RefreshAll(
 		}
 
 		log.Info("refresh-all: refreshing", "id", id, "email", acct.Email)
-		newData, newCred, err := RefreshOne(ctx, cred)
+		newData, newCred, err := RefreshOne(ctx, cred, local)
 		if err != nil {
 			log.Error("refresh-all: refresh failed", "id", id, "err", err)
 			failed++
