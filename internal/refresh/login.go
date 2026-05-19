@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/account"
 	"github.com/zach-source/ccswitch/internal/backend"
+	"github.com/zach-source/ccswitch/internal/browser"
 	"github.com/zach-source/ccswitch/internal/credentials"
 )
 
@@ -133,12 +135,21 @@ func LoginRotate(
 		// credentials themselves go to the keychain on macOS.
 		_ = os.WriteFile(filepath.Join(tmpConfig, ".claude.json"), []byte(seedJSON), 0o600)
 
+		// If a Chrome profile is signed in to this email, install an `open`
+		// shim that routes the OAuth URL into that profile — no manual
+		// browser-switching during a multi-account login flow.
+		profileBin := installChromeOpener(tmpWork, t.email)
+
 		cmd := exec.CommandContext(ctx, claudePath, "auth", "login", "--email", t.email)
 		cmd.Dir = tmpWork
 		cmd.Stdin = os.Stdin
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-		cmd.Env = append(filteredEnv(), "CLAUDE_CONFIG_DIR="+tmpConfig)
+		env := append(filteredEnv(), "CLAUDE_CONFIG_DIR="+tmpConfig)
+		if profileBin != "" {
+			env = prependPath(env, profileBin)
+		}
+		cmd.Env = env
 
 		_ = cmd.Run() // interactive; ignore exit code
 
@@ -228,4 +239,37 @@ func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []b
 
 func separator() string {
 	return "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+}
+
+// installChromeOpener installs an `open` shim under workDir/bin that routes
+// URLs into the Chrome profile signed in to email, and returns that
+// directory for PATH prepending. Returns "" when there is no matching
+// profile or Chrome is unavailable — the login then falls back to the
+// system default browser. All errors are best-effort logged to stderr; a
+// missing profile is not a failure of the login flow itself.
+func installChromeOpener(workDir, email string) string {
+	profile, ok, err := browser.FindByEmail(email)
+	if err != nil || !ok {
+		return ""
+	}
+	dir := filepath.Join(workDir, "bin")
+	if err := browser.InstallOpener(dir, profile.Directory); err != nil {
+		fmt.Fprintf(os.Stderr, "  (could not install Chrome opener shim: %v)\n", err)
+		return ""
+	}
+	fmt.Printf("  Using Chrome profile: %s (%s)\n", profile.Directory, profile.UserName)
+	return dir
+}
+
+// prependPath rewrites env so the named directory is the first entry of
+// $PATH. Returns env modified in place; appends a fresh PATH= entry if env
+// had none.
+func prependPath(env []string, dir string) []string {
+	for i, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			env[i] = "PATH=" + dir + string(os.PathListSeparator) + strings.TrimPrefix(kv, "PATH=")
+			return env
+		}
+	}
+	return append(env, "PATH="+dir)
 }
