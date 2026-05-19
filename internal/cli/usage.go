@@ -232,6 +232,11 @@ func shortModels(models []string) []string {
 
 // ── usage-all ─────────────────────────────────────────────────────────────
 
+// anthropicUsageURL is the OAuth usage endpoint. It is a package var rather
+// than a constant solely so the conformance suite can point fetchOAuthUsage
+// at an httptest server.
+var anthropicUsageURL = "https://api.anthropic.com/api/oauth/usage"
+
 // oauthUsage is the shape returned by the Anthropic OAuth usage API.
 type oauthUsage struct {
 	FiveHour struct {
@@ -379,8 +384,7 @@ func readAccountCred(ctx context.Context, b backend.Backend, isActive bool, id, 
 
 // fetchOAuthUsage calls the Anthropic OAuth usage endpoint with a bearer token.
 func fetchOAuthUsage(ctx context.Context, token string) (*oauthUsage, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"https://api.anthropic.com/api/oauth/usage", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, anthropicUsageURL, nil)
 	if err != nil {
 		return nil, err
 	}
