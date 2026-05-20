@@ -44,9 +44,10 @@ type Backend interface {
 type Type string
 
 const (
-	TypeAuto        Type = "auto"
-	TypeFile        Type = "file"
-	TypeKeychain    Type = "keychain"
-	TypeOnePassword Type = "1password"
-	TypeVault       Type = "vault"
+	TypeAuto           Type = "auto"
+	TypeFile           Type = "file"
+	TypeKeychain       Type = "keychain"
+	TypeOnePassword    Type = "1password"
+	TypeOnePasswordCLI Type = "1password-cli"
+	TypeVault          Type = "vault"
 )

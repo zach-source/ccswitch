@@ -131,6 +131,12 @@ func resolveBackend(cfg *config.Config) (backend.Backend, error) {
 		return keychain.New(), nil
 	case backend.TypeOnePassword:
 		return newOnePasswordBackend(cfg)
+	case backend.TypeOnePasswordCLI:
+		return onepassword.NewCLI(onepassword.CLIConfig{
+			Vault:      cfg.OnePassword.Vault,
+			ItemPrefix: cfg.OnePassword.ItemPrefix,
+			Account:    cfg.OnePassword.Account,
+		})
 	case backend.TypeVault:
 		return vault.New(vault.Config{
 			Addr:  cfg.Vault.Addr,
