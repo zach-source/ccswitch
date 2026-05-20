@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -25,11 +26,20 @@ type CLIConfig struct {
 // user's full permissions and bypasses Connect entirely. The trade-off is
 // that the caller must have an authenticated op session — typically via
 // the 1Password desktop app's biometric integration.
+//
+// One `op signin` happens lazily on the first sub-command and the resulting
+// session token is kept in sessionEnv ("OP_SESSION_<short>=<token>"). Every
+// subsequent op invocation in the same process appends that env entry, so
+// the biometric / desktop-app prompt fires at most once per ccswitch run
+// no matter how many items get touched.
 type CLIBackend struct {
 	opBin   string
 	vault   string
 	prefix  string
 	account string
+
+	sessionEnv string // populated lazily by ensureSession; empty when signin yielded nothing
+	signedIn   bool   // true once ensureSession has run (success or no-op)
 }
 
 // NewCLI returns a CLIBackend, verifying that the op CLI is on PATH and
@@ -74,6 +84,70 @@ func (b *CLIBackend) withAccount(args ...string) []string {
 	return append([]string{"--account", b.account}, args...)
 }
 
+// accountShorthand returns the OP_SESSION_<short> name op expects for the
+// configured account. op derives the shorthand from the URL's first dot
+// segment ("stigenai.1password.com" → "stigenai"); when no --account is
+// configured we leave the shorthand empty and skip session caching.
+func (b *CLIBackend) accountShorthand() string {
+	s := strings.TrimPrefix(b.account, "https://")
+	s = strings.TrimPrefix(s, "http://")
+	if i := strings.IndexByte(s, '.'); i > 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// ensureSession runs `op signin --raw` once and stashes the resulting
+// session token in an OP_SESSION_<short>=<token> env entry. Subsequent op
+// invocations in the same process append sessionEnv to cmd.Env so they do
+// not re-prompt for biometric / desktop-app approval.
+//
+// If signin produces no token (the user has 1Password desktop app
+// integration enabled, which provides authentication on its own) the
+// method is a harmless no-op — those calls already run without prompts.
+// If signin fails, the method does not surface the error; the next op
+// call will fail with the real cause if the user truly is unauthenticated.
+func (b *CLIBackend) ensureSession(ctx context.Context) {
+	if b.signedIn {
+		return
+	}
+	b.signedIn = true // either way, only try once per process
+
+	short := b.accountShorthand()
+	if short == "" {
+		return // no shorthand to bind OP_SESSION_<short> to; skip
+	}
+
+	args := []string{"signin", "--raw"}
+	if b.account != "" {
+		args = append([]string{"--account", b.account}, args...)
+	}
+	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	// Inherit stdio so the biometric / passphrase prompt reaches the user.
+	cmd.Stdin, cmd.Stderr = nil, nil
+	out, err := cmd.Output()
+	if err != nil {
+		return
+	}
+	token := strings.TrimSpace(string(out))
+	if token == "" {
+		return
+	}
+	b.sessionEnv = "OP_SESSION_" + short + "=" + token
+}
+
+// opCmd returns an op *exec.Cmd with the cached session env appended
+// (when present) so the call does not re-prompt for approval. Every op
+// invocation in this file goes through here.
+func (b *CLIBackend) opCmd(ctx context.Context, args ...string) *exec.Cmd {
+	b.ensureSession(ctx)
+	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	if b.sessionEnv != "" {
+		cmd.Env = append(os.Environ(), b.sessionEnv)
+	}
+	return cmd
+}
+
 // isItemNotFound recognizes op's various "this item doesn't exist" error
 // messages across CLI versions.
 func isItemNotFound(stderr string) bool {
@@ -88,8 +162,7 @@ func isItemNotFound(stderr string) bool {
 // per-key title from the configured vault.
 func (b *CLIBackend) Read(ctx context.Context, key string) ([]byte, error) {
 	title := b.itemTitle(key)
-	args := b.withAccount("document", "get", title, "--vault", b.vault)
-	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd := b.opCmd(ctx, b.withAccount("document", "get", title, "--vault", b.vault)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -120,8 +193,7 @@ func (b *CLIBackend) Write(ctx context.Context, key string, data []byte) error {
 }
 
 func (b *CLIBackend) docEdit(ctx context.Context, title string, data []byte) error {
-	args := b.withAccount("document", "edit", title, "-", "--vault", b.vault)
-	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd := b.opCmd(ctx, b.withAccount("document", "edit", title, "-", "--vault", b.vault)...)
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -136,8 +208,7 @@ func (b *CLIBackend) docEdit(ctx context.Context, title string, data []byte) err
 }
 
 func (b *CLIBackend) docCreate(ctx context.Context, title string, data []byte) error {
-	args := b.withAccount("document", "create", "-", "--vault", b.vault, "--title", title)
-	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd := b.opCmd(ctx, b.withAccount("document", "create", "-", "--vault", b.vault, "--title", title)...)
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -152,8 +223,7 @@ func (b *CLIBackend) docCreate(ctx context.Context, title string, data []byte) e
 // (idempotent).
 func (b *CLIBackend) Delete(ctx context.Context, key string) error {
 	title := b.itemTitle(key)
-	args := b.withAccount("document", "delete", title, "--vault", b.vault)
-	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd := b.opCmd(ctx, b.withAccount("document", "delete", title, "--vault", b.vault)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -169,8 +239,7 @@ func (b *CLIBackend) Delete(ctx context.Context, key string) error {
 // HealthCheck implements backend.Backend by reading the configured vault's
 // metadata. Surfaces missing op-CLI sessions as a clear error.
 func (b *CLIBackend) HealthCheck(ctx context.Context) error {
-	args := b.withAccount("vault", "get", b.vault)
-	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd := b.opCmd(ctx, b.withAccount("vault", "get", b.vault)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
