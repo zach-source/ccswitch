@@ -331,7 +331,7 @@ func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend,
 			fmt.Printf("  %sQuerying #%s %s...%s ", ansiDim, id, acct.Email, ansiReset)
 		}
 
-		cred := readAccountCred(ctx, b, id == active, id, acct.Email)
+		cred := readAccountCred(ctx, b, local, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
 			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred, local); err == nil {
 				// Cache the refreshed bytes back to the backend (raw, never a
@@ -373,13 +373,26 @@ func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend,
 	return out
 }
 
-// readAccountCred reads an account's credentials from the active slot (when
-// isActive) or its backup slot. Returns nil on any miss.
-func readAccountCred(ctx context.Context, b backend.Backend, isActive bool, id, email string) *credentials.Credentials {
-	key := account.BackupCredKey(id, email)
+// readAccountCred returns an account's best available credential.
+//
+// For the active account the freshest copy is the local active slot (the
+// live keychain credential `claude` is using right now), so that is tried
+// first. Every account (active or not) then falls back to its per-account
+// backup key in the configured store — which is where login/save/sync put
+// credentials, and the only place they exist when the store is a remote
+// backend like 1Password. Returns nil only when neither source yields a
+// parseable credential.
+func readAccountCred(ctx context.Context, store, local backend.Backend, isActive bool, id, email string) *credentials.Credentials {
 	if isActive {
-		key = account.ActiveCredKey
+		if cred := tryReadCred(ctx, local, account.ActiveCredKey); cred != nil {
+			return cred
+		}
 	}
+	return tryReadCred(ctx, store, account.BackupCredKey(id, email))
+}
+
+// tryReadCred reads and parses one credential, returning nil on any miss.
+func tryReadCred(ctx context.Context, b backend.Backend, key string) *credentials.Credentials {
 	data, err := b.Read(ctx, key)
 	if err != nil || len(data) == 0 {
 		return nil
