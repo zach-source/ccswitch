@@ -152,6 +152,16 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 		return fmt.Errorf("account %s not found", targetID)
 	}
 
+	// Two backend roles. The active slot (ActiveCredKey) is always the local
+	// store — keychain on macOS — because that is what `claude` actually
+	// reads. Per-account backups (BackupCredKey) live in the *configured*
+	// backend, which may be remote (1Password); that is where `login` and
+	// `save` write them. When the configured backend is the local one these
+	// are the same object, and the code below still works.
+	store, err := resolveBackend(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve backend: %w", err)
+	}
 	localCfg := *cfg
 	localCfg.Backend = autoLocalBackend()
 	local, err := resolveBackend(&localCfg)
@@ -161,17 +171,17 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 
 	ctx := cmd.Context()
 
-	// 1. Read target's backup creds; surface ErrNotFound with a useful hint.
-	targetData, err := local.Read(ctx, account.BackupCredKey(targetID, acct.Email))
+	// 1. Read target's backup creds from the store; useful hint on miss.
+	targetData, err := store.Read(ctx, account.BackupCredKey(targetID, acct.Email))
 	if err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
-			return fmt.Errorf("no stored credentials for %s (%s); run `ccswitch login %s` first",
+			return fmt.Errorf("no stored credentials for %s (%s); run `ccswitch login --only %s` first",
 				targetID, acct.Email, targetID)
 		}
 		return fmt.Errorf("read target creds: %w", err)
 	}
 
-	// 2. Snapshot prior active into its backup slot (best-effort).
+	// 2. Snapshot prior active into its backup slot in the store (best-effort).
 	// The prior-active account is taken from the live .claude.json, not
 	// sequence.json's recorded activeAccountId — the recorded value can be
 	// stale, and snapshotting the active slot under the wrong account's
@@ -181,7 +191,7 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 		if cur, ok := seq.Accounts[priorID]; ok {
 			data, rerr := local.Read(ctx, account.ActiveCredKey)
 			if rerr == nil && len(data) > 0 {
-				if werr := local.Write(ctx, account.BackupCredKey(priorID, cur.Email), data); werr != nil {
+				if werr := store.Write(ctx, account.BackupCredKey(priorID, cur.Email), data); werr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
 				}
 			} else if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {

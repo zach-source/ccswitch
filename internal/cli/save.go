@@ -41,13 +41,23 @@ func newSaveCmd() *cobra.Command {
 			}
 
 			// Read active credentials from the configured backend.
-			b, err := resolveBackend(cfg)
+			// The active slot lives in the local store (keychain on macOS —
+			// what claude reads); per-account backups go to the configured
+			// store, which may be remote (1Password). When the configured
+			// backend is the local one these resolve to the same object.
+			store, err := resolveBackend(cfg)
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
+			localCfg := *cfg
+			localCfg.Backend = autoLocalBackend()
+			local, err := resolveBackend(&localCfg)
+			if err != nil {
+				return fmt.Errorf("local backend not available: %w", err)
+			}
 
 			ctx := cmd.Context()
-			credsData, err := b.Read(ctx, account.ActiveCredKey)
+			credsData, err := local.Read(ctx, account.ActiveCredKey)
 			if err != nil {
 				return fmt.Errorf("read active credentials: %w", err)
 			}
@@ -58,7 +68,7 @@ func newSaveCmd() *cobra.Command {
 			}
 
 			backupKey := account.BackupCredKey(id, activeAcct.Email)
-			if err := b.Write(ctx, backupKey, credsData); err != nil {
+			if err := store.Write(ctx, backupKey, credsData); err != nil {
 				return fmt.Errorf("write backup credentials: %w", err)
 			}
 
