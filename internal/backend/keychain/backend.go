@@ -125,21 +125,26 @@ func (b *Backend) Delete(_ context.Context, key string) error {
 	return nil
 }
 
-// LookupHashedActiveSlot returns the data of a generic-password keychain
-// item whose service starts with "Claude Code-credentials-" and whose
-// modification date is at or after since.
+// LookupHashedActiveSlot returns the data AND the service name of a
+// generic-password keychain item whose service starts with "Claude
+// Code-credentials-" and whose modification date is at or after since.
 //
 // claude 2.x writes the per-CLAUDE_CONFIG_DIR isolated active credential
 // to a keychain service of the form "Claude Code-credentials-<8hex>",
-// where the suffix is an opaque hash of the CONFIG_DIR path. ccswitch
-// cannot reasonably mirror that hashing, so the conformance suite finds
-// the freshly-written item by enumeration + modification-date filter.
-// Returns (nil, nil) when no matching item exists. The most-recently-
-// modified match is returned when several qualify.
-func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, error) {
+// where the suffix is an opaque hash of internal config state. ccswitch
+// cannot mirror that hashing — and crucially the suffix changes between
+// runs even for the same CONFIG_DIR path — so each login that captures
+// from this slot leaves a distinct orphaned record behind. The caller
+// uses the returned service name to delete that orphan after persisting
+// the credential to the backend.
+//
+// The freshly-written item is found by enumeration + modification-date
+// filter. Returns ("", nil, nil) when no matching item exists. The
+// most-recently-modified match is returned when several qualify.
+func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, string, error) {
 	acct, err := currentUser()
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Security.framework rejects MatchLimitAll combined with both
@@ -155,9 +160,9 @@ func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) (
 	results, err := gokeychain.QueryItem(q)
 	if err != nil {
 		if err == gokeychain.ErrorItemNotFound { //nolint:errorlint
-			return nil, nil
+			return nil, "", nil
 		}
-		return nil, fmt.Errorf("keychain backend: enumerate generic passwords: %w", err)
+		return nil, "", fmt.Errorf("keychain backend: enumerate generic passwords: %w", err)
 	}
 
 	// Allow a small clock-skew tolerance — keychain mdat is second-grained.
@@ -180,9 +185,13 @@ func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) (
 		}
 	}
 	if !found {
-		return nil, nil
+		return nil, "", nil
 	}
-	return b.Read(ctx, newestSvc)
+	data, err := b.Read(ctx, newestSvc)
+	if err != nil {
+		return nil, "", err
+	}
+	return data, newestSvc, nil
 }
 
 // HealthCheck verifies that the keychain is accessible by performing a

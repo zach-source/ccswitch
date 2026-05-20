@@ -43,8 +43,8 @@ func (b *Backend) HealthCheck(_ context.Context) error {
 
 // LookupHashedActiveSlot is unsupported on non-Darwin platforms — claude
 // 2.x's per-CLAUDE_CONFIG_DIR hashed keychain item is a macOS-only mechanism.
-func (b *Backend) LookupHashedActiveSlot(_ context.Context, _ time.Time) ([]byte, error) {
-	return nil, ErrNotSupported
+func (b *Backend) LookupHashedActiveSlot(_ context.Context, _ time.Time) ([]byte, string, error) {
+	return nil, "", ErrNotSupported
 }
 
 // Compile-time interface check.

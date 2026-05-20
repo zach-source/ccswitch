@@ -117,9 +117,17 @@ func LoginRotate(
 		beforeData, _ := local.Read(ctx, account.ActiveCredKey)
 		since := time.Now()
 
-		tmpConfig, err := os.MkdirTemp("", "ccswitch-login-config-*")
-		if err != nil {
-			log.Error("login: create config tmpdir", "id", t.id, "err", err)
+		// Deterministic per-account config dir instead of a fresh random
+		// one. claude 2.x writes the credential to a hashed keychain
+		// service "Claude Code-credentials-<hash>" while CLAUDE_CONFIG_DIR
+		// is set; a throwaway random dir orphaned a brand-new record every
+		// login (we accumulated dozens). A stable path bounds that, and the
+		// captured slot is deleted outright below. Cleared each run so a
+		// cancelled prior login cannot leak its identity into this one.
+		tmpConfig := filepath.Join(os.TempDir(), "ccswitch-login-"+t.id)
+		_ = os.RemoveAll(tmpConfig)
+		if err := os.MkdirAll(tmpConfig, 0o700); err != nil {
+			log.Error("login: create config dir", "id", t.id, "err", err)
 			continue
 		}
 		tmpWork, err := os.MkdirTemp("", "ccswitch-login-work-*")
@@ -155,7 +163,7 @@ func LoginRotate(
 
 		// LoginRotate does not seed .credentials.json, so any file that
 		// appears at the legacy path came from claude.
-		newData := captureClaudeCredential(ctx, tmpConfig, nil, local, beforeData, since)
+		newData, hashedSvc := captureClaudeCredential(ctx, tmpConfig, nil, local, beforeData, since)
 
 		_ = os.RemoveAll(tmpConfig)
 		_ = os.RemoveAll(tmpWork)
@@ -185,6 +193,15 @@ func LoginRotate(
 		fmt.Printf("\nCredentials saved for %s (%s)\n", t.id, t.email)
 		log.Info("login: refreshed", "id", t.id, "email", t.email)
 		refreshed++
+
+		// The hashed keychain slot was a throwaway login-capture artifact;
+		// the credential now lives safely in the backend. Delete it so it
+		// does not accumulate. Best-effort: a failure here is cosmetic.
+		if hashedSvc != "" {
+			if err := local.Delete(ctx, hashedSvc); err != nil {
+				log.Warn("login: could not delete captured hashed slot", "service", hashedSvc, "err", err)
+			}
+		}
 	}
 
 	fmt.Printf("\n%s\n", separator())
@@ -197,7 +214,7 @@ func LoginRotate(
 // CLAUDE_CONFIG_DIR is set. The keychain backend implements it; other
 // backends do not and are simply skipped by the type assertion below.
 type hashedSlotLookup interface {
-	LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, error)
+	LookupHashedActiveSlot(ctx context.Context, since time.Time) ([]byte, string, error)
 }
 
 // captureClaudeCredential returns the raw credential blob that `claude auth
@@ -217,24 +234,29 @@ type hashedSlotLookup interface {
 //  3. Claude 2.x's per-CLAUDE_CONFIG_DIR hashed keychain slot — service
 //     "Claude Code-credentials-<8hex>". Found by enumeration + a
 //     modification-date filter (since), since the hash is opaque to us.
-func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []byte, local backend.Backend, beforeLocal []byte, since time.Time) []byte {
+//
+// The second return value is the hashed keychain service name when (and
+// only when) the credential was captured from source 3; it is "" for
+// sources 1 and 2. The caller deletes that service after persisting the
+// credential so the orphaned login-capture record does not accumulate.
+func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []byte, local backend.Backend, beforeLocal []byte, since time.Time) ([]byte, string) {
 	if data, err := os.ReadFile(filepath.Join(tmpConfig, ".credentials.json")); err == nil && len(data) > 0 {
 		if !bytes.Equal(data, seedData) {
-			return data
+			return data, ""
 		}
 	}
 	if local == nil {
-		return nil
+		return nil, ""
 	}
 	if data, err := local.Read(ctx, account.ActiveCredKey); err == nil && len(data) > 0 && !bytes.Equal(data, beforeLocal) {
-		return data
+		return data, ""
 	}
 	if lookup, ok := local.(hashedSlotLookup); ok {
-		if data, err := lookup.LookupHashedActiveSlot(ctx, since); err == nil && len(data) > 0 {
-			return data
+		if data, svc, err := lookup.LookupHashedActiveSlot(ctx, since); err == nil && len(data) > 0 {
+			return data, svc
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 func separator() string {
