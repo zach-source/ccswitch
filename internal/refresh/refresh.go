@@ -118,9 +118,15 @@ func RefreshOne(ctx context.Context, cred *credentials.Credentials, local backen
 	// parse below is only an inspection lens. credData (the seed we wrote
 	// to credFile above) lets capture distinguish "claude rewrote the
 	// file" from "the seed is still there."
-	newData := captureClaudeCredential(ctx, tmpConfig, credData, local, beforeActive, since)
+	newData, hashedSvc := captureClaudeCredential(ctx, tmpConfig, credData, local, beforeActive, since)
 	if len(newData) == 0 {
 		return nil, nil, fmt.Errorf("refresh: claude auth login did not produce credentials")
+	}
+	// claude wrote the credential to a per-CLAUDE_CONFIG_DIR hashed keychain
+	// slot; we have the bytes now, so delete that throwaway record to keep it
+	// from accumulating. Best-effort.
+	if hashedSvc != "" && local != nil {
+		_ = local.Delete(ctx, hashedSvc)
 	}
 	newCred, err := credentials.Parse(newData)
 	if err != nil {

@@ -115,17 +115,20 @@ func TestBackend_LookupHashedActiveSlot(t *testing.T) {
 		t.Fatalf("seed write: %v", err)
 	}
 
-	got, err := b.LookupHashedActiveSlot(ctx, since)
+	got, gotSvc, err := b.LookupHashedActiveSlot(ctx, since)
 	if err != nil {
 		t.Fatalf("LookupHashedActiveSlot: %v", err)
 	}
 	if string(got) != string(payload) {
 		t.Fatalf("payload mismatch:\n want %s\n  got %s", payload, got)
 	}
+	if gotSvc != svc {
+		t.Fatalf("service name mismatch: want %q got %q", svc, gotSvc)
+	}
 
 	// A future `since` filters the item out.
 	future := time.Now().Add(1 * time.Hour)
-	if got, err := b.LookupHashedActiveSlot(ctx, future); err != nil || got != nil {
-		t.Fatalf("future since must return (nil, nil): got=%q err=%v", got, err)
+	if got, gotSvc, err := b.LookupHashedActiveSlot(ctx, future); err != nil || got != nil || gotSvc != "" {
+		t.Fatalf("future since must return (nil, \"\", nil): got=%q svc=%q err=%v", got, gotSvc, err)
 	}
 }
