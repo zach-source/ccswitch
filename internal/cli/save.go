@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -70,6 +71,19 @@ func newSaveCmd() *cobra.Command {
 			backupKey := account.BackupCredKey(id, activeAcct.Email)
 			if err := store.Write(ctx, backupKey, credsData); err != nil {
 				return fmt.Errorf("write backup credentials: %w", err)
+			}
+
+			// Snapshot the live identity block alongside the credentials.
+			// Switching back to this account later restores both halves; the
+			// credential alone is not enough — Claude Code reads its
+			// displayed identity from ~/.claude.json.oauthAccount, not from
+			// the OAuth token.
+			if block, berr := readClaudeOAuthBlock(); berr == nil && len(block) > 0 {
+				activeAcct.OAuthAccount = block
+				seq.Accounts[id] = activeAcct
+				if err := seq.Save(sequencePath()); err != nil {
+					fmt.Fprintf(os.Stderr, "Warning: could not persist identity snapshot: %v\n", err)
+				}
 			}
 
 			hoursLeft := creds.HoursLeft()

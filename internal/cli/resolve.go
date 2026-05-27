@@ -63,6 +63,61 @@ func readClaudeIdentity() claudeIdentity {
 	}
 }
 
+// readClaudeOAuthBlock returns the raw `oauthAccount` JSON value from the live
+// .claude.json, or (nil, nil) when the file or the key is absent. Callers use
+// this to snapshot the live identity before a switch.
+func readClaudeOAuthBlock() (json.RawMessage, error) {
+	data, err := os.ReadFile(claudeConfigPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", claudeConfigPath(), err)
+	}
+	return top["oauthAccount"], nil
+}
+
+// writeClaudeOAuthBlock atomically merges `block` into the top-level
+// "oauthAccount" key of the live .claude.json, leaving every other top-level
+// key (sessions, MCP cache, project state) byte-identical. The write is a
+// temp-file + rename so concurrent readers (a running Claude Code) never see
+// a partial file. If .claude.json doesn't exist yet it's created with just
+// the oauthAccount key set.
+func writeClaudeOAuthBlock(block json.RawMessage) error {
+	if len(block) == 0 {
+		return fmt.Errorf("empty oauthAccount block")
+	}
+	path := claudeConfigPath()
+	data, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	top := map[string]json.RawMessage{}
+	if len(data) > 0 {
+		if err := json.Unmarshal(data, &top); err != nil {
+			return fmt.Errorf("parse %s: %w", path, err)
+		}
+	}
+	top["oauthAccount"] = block
+
+	out, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // activeID returns the ID of the account currently logged in to Claude Code.
 // The live source of truth is ~/.claude/.claude.json, not sequence.json's
 // activeAccountId field — that recorded value goes stale whenever the user
