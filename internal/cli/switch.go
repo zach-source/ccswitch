@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -197,6 +199,14 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 			} else if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {
 				fmt.Fprintf(os.Stderr, "Warning: could not read prior active creds: %v\n", rerr)
 			}
+			// Also snapshot the prior identity block. The freshly-read live
+			// identity is the right thing to file under the prior account —
+			// the recorded OAuthAccount on the sequence can be older. Saved
+			// to disk along with ActiveAccountID in step 3 below.
+			if block, berr := readClaudeOAuthBlock(); berr == nil && len(block) > 0 {
+				cur.OAuthAccount = block
+				seq.Accounts[priorID] = cur
+			}
 		}
 	}
 
@@ -213,6 +223,45 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	// 4. Write target into active slot.
 	if err := local.Write(ctx, account.ActiveCredKey, targetData); err != nil {
 		return fmt.Errorf("write active slot: %w", err)
+	}
+
+	// 5. Restore target's identity into ~/.claude.json. Without this only the
+	// OAuth token swaps; Claude Code keeps showing the previous account
+	// because it reads `oauthAccount` (email, accountUuid, organizationUuid,
+	// displayName, ...) from the JSON file, not from the token.
+	//
+	// Source order: the per-account block captured at add-account/save time,
+	// then a legacy ~/.claude-switch-backup/configs/.claude-config-<id>-<email>.json
+	// snapshot (left over from the shell ccswitch.sh) so accounts added
+	// before this feature get a working switch without re-running save.
+	identity := acct.OAuthAccount
+	if len(identity) == 0 {
+		legacy := filepath.Join(backupDir(), "configs",
+			fmt.Sprintf(".claude-config-%s-%s.json", targetID, acct.Email))
+		if data, rerr := os.ReadFile(legacy); rerr == nil {
+			var top map[string]json.RawMessage
+			if json.Unmarshal(data, &top) == nil {
+				if block, ok := top["oauthAccount"]; ok && len(block) > 0 {
+					identity = block
+					// Persist forward so the legacy snapshot is no longer needed.
+					acct.OAuthAccount = block
+					seq.Accounts[targetID] = acct
+					_ = seq.Save(sequencePath())
+				}
+			}
+		}
+	}
+	if len(identity) > 0 {
+		if err := writeClaudeOAuthBlock(identity); err != nil {
+			return fmt.Errorf("write target identity to ~/.claude.json: %w", err)
+		}
+	} else {
+		fmt.Fprintf(os.Stderr,
+			"Warning: no stored identity for %s (%s). The OAuth token was swapped,\n"+
+				"but Claude Code will keep showing the previous account on restart.\n"+
+				"Run `ccswitch save` once while logged in as %s to capture its\n"+
+				"identity for future switches.\n",
+			targetID, acct.Email, acct.Email)
 	}
 
 	fmt.Printf("Switched to %s (%s)\n", targetID, acct.Email)

@@ -56,6 +56,14 @@ func newAddAccountCmd() *cobra.Command {
 				OrgName:     identity.Org,
 				AddedAt:     time.Now().UTC().Format(time.RFC3339),
 			}
+			// Capture the full oauthAccount block so a future `switch-to`
+			// can restore this account's identity into ~/.claude.json
+			// alongside its credentials. Without this, switching only swaps
+			// the OAuth token; the identity Claude Code displays stays on
+			// whichever account was active when the file was last written.
+			if block, err := readClaudeOAuthBlock(); err == nil && len(block) > 0 {
+				acct.OAuthAccount = block
+			}
 			seq.Add(id, acct)
 
 			if err := seq.Save(sequencePath()); err != nil {

@@ -30,6 +30,11 @@ type Account struct {
 	AccountUUID      string `json:"accountUuid,omitempty"`
 	AddedAt          string `json:"addedAt,omitempty"`
 	WeeklyTokenLimit int64  `json:"weeklyTokenLimit,omitempty"`
+	// OAuthAccount is the verbatim `oauthAccount` block from ~/.claude.json
+	// for this account, captured at add/save time. Restored into the live
+	// .claude.json on switch so Claude Code's displayed identity stays
+	// paired with the active credentials in the Keychain.
+	OAuthAccount json.RawMessage `json:"oauthAccount,omitempty"`
 }
 
 // Sequence is the on-disk sequence.json format (v2 — hash-based IDs).
