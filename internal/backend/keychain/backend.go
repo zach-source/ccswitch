@@ -6,8 +6,11 @@
 package keychain
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"os/exec"
 	"os/user"
 	"strings"
 	"time"
@@ -40,30 +43,46 @@ func currentUser() (string, error) {
 
 // Read retrieves the credential blob stored under key. Returns
 // backend.ErrNotFound when no matching item exists in the keychain.
+//
+// Reads go through /usr/bin/security rather than Security.framework directly.
+// The keychain records an "Always Allow" grant against the *calling binary's*
+// code identity, but a Nix-built ccswitch is ad-hoc/linker-signed with no
+// stable designated requirement, so macOS can never persist a grant to it —
+// every direct read re-prompts for the login-keychain password, forever, and
+// worse on every rebuild (new /nix/store path). /usr/bin/security is an Apple
+// platform binary with a stable identity, so a single "Always Allow" for it
+// sticks across ccswitch updates. The secret is returned on stdout, never in
+// argv, so this keeps the argv-exposure protection that motivated go-keychain
+// (only the non-secret service/account names appear in the command line).
 func (b *Backend) Read(_ context.Context, key string) ([]byte, error) {
 	acct, err := currentUser()
 	if err != nil {
 		return nil, err
 	}
+	return readViaSecurityCLI(key, acct)
+}
 
-	q := gokeychain.NewItem()
-	q.SetSecClass(gokeychain.SecClassGenericPassword)
-	q.SetService(key)
-	q.SetAccount(acct)
-	q.SetMatchLimit(gokeychain.MatchLimitOne)
-	q.SetReturnData(true)
-
-	results, err := gokeychain.QueryItem(q)
-	if err != nil {
-		if err == gokeychain.ErrorItemNotFound { //nolint:errorlint
+// readViaSecurityCLI shells out to `security find-generic-password -w`. It
+// assumes the stored blob is text (ccswitch only stores JSON credentials);
+// `security -w` emits a text password followed by a single trailing newline,
+// which is stripped. Exit status 44 is errSecItemNotFound.
+func readViaSecurityCLI(service, account string) ([]byte, error) {
+	cmd := exec.Command("/usr/bin/security", "find-generic-password",
+		"-s", service, "-a", account, "-w")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 44 {
 			return nil, backend.ErrNotFound
 		}
-		return nil, fmt.Errorf("keychain backend: read %q: %w", key, err)
+		return nil, fmt.Errorf("keychain backend: security read %q: %w: %s",
+			service, err, strings.TrimSpace(stderr.String()))
 	}
-	if len(results) == 0 {
-		return nil, backend.ErrNotFound
-	}
-	return results[0].Data, nil
+	// `security -w` appends exactly one newline to the emitted password; the
+	// stored credential blob has none, so remove a single trailing \n.
+	return bytes.TrimSuffix(stdout.Bytes(), []byte("\n")), nil
 }
 
 // Write stores data under key. If an item already exists it is updated
