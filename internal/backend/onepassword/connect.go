@@ -283,7 +283,7 @@ func (b *Backend) apiDo(ctx context.Context, method, path string, body any, dest
 	}
 	if resp.StatusCode >= 400 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("http %s %s: status %d: %s", method, path, resp.StatusCode, msg)
+		return &httpError{status: resp.StatusCode, method: method, path: path, msg: string(msg)}
 	}
 	if dest != nil && resp.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
@@ -291,6 +291,18 @@ func (b *Backend) apiDo(ctx context.Context, method, path string, body any, dest
 		}
 	}
 	return nil
+}
+
+// httpError is a Connect API error carrying the HTTP status, so callers can
+// react to specific codes (e.g. 403 → fall back to the op CLI) via errors.As.
+type httpError struct {
+	status       int
+	method, path string
+	msg          string
+}
+
+func (e *httpError) Error() string {
+	return fmt.Sprintf("http %s %s: status %d: %s", e.method, e.path, e.status, e.msg)
 }
 
 // errNotFound wraps backend.ErrNotFound with key context so errors.Is works.

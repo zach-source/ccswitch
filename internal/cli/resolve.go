@@ -257,7 +257,7 @@ func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 		return nil, err
 	}
 
-	return onepassword.New(onepassword.Config{
+	connect, err := onepassword.New(onepassword.Config{
 		Host:                 cfg.OnePassword.ConnectHost,
 		BearerToken:          bearer,
 		CFAccessClientID:     cfID,
@@ -265,6 +265,24 @@ func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 		VaultName:            cfg.OnePassword.Vault,
 		ItemPrefix:           cfg.OnePassword.ItemPrefix,
 	})
+	if err != nil {
+		return nil, err
+	}
+
+	// When the op CLI is available, wrap Connect so writes/deletes fall back
+	// to the user's full-permission op session on a 403 — Connect tokens are
+	// commonly read-only on the vault (scope fixed at token creation).
+	cli, cliErr := onepassword.NewCLI(onepassword.CLIConfig{
+		Vault:      cfg.OnePassword.Vault,
+		ItemPrefix: cfg.OnePassword.ItemPrefix,
+		Account:    cfg.OnePassword.Account,
+	})
+	if cliErr != nil {
+		// op CLI not installed/configured — Connect-only (writes need a
+		// read/write token). Not fatal for read-only callers.
+		return connect, nil
+	}
+	return onepassword.NewWriteFallback(connect, cli), nil
 }
 
 // resolvedBackendName returns the human-readable effective backend name,
