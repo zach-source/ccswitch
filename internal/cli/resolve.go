@@ -282,7 +282,7 @@ func newOnePasswordBackend(cfg *config.Config) (backend.Backend, error) {
 		// read/write token). Not fatal for read-only callers.
 		return connect, nil
 	}
-	return onepassword.NewWriteFallback(connect, cli), nil
+	return onepassword.NewCLIFallback(connect, cli), nil
 }
 
 // resolvedBackendName returns the human-readable effective backend name,
