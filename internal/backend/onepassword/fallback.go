@@ -7,32 +7,47 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend"
 )
 
-// WriteFallback reads through a Connect backend but retries writes and deletes
-// through the op CLI when Connect denies them with 403. This covers the common
-// deployment where the Connect token is read-only on the vault (its scope is
-// fixed at token-creation time) while the user's op session has full access.
-type WriteFallback struct {
+// CLIFallback layers the user's op CLI session under a Connect backend to cover
+// two gaps in a read-only-token / CLI-written-item deployment:
+//
+//   - Writes: a Connect token's read/write scope is fixed at creation, so a
+//     read-only token 403s on login's credential write. Write/Delete retry
+//     through the op CLI (full user permissions) on a 403.
+//   - Reads: the CLI backend stores credentials as op *documents*, whose payload
+//     Connect's Read (which only understands secure-note "credentials" fields)
+//     cannot see — it returns ErrNotFound. Read retries through the op CLI on
+//     ErrNotFound so document-stored items remain readable (e.g. usage-all for
+//     non-active accounts).
+//
+// Reads try Connect first (fast, no biometric) and only touch the CLI when
+// Connect can't satisfy them, so the op session is prompted at most once per
+// run and only when actually needed.
+type CLIFallback struct {
 	primary *Backend
 	cli     *CLIBackend
 }
 
-// NewWriteFallback wraps primary so mutating operations fall back to cli on a
-// permission-denied (403) response. Reads and health checks stay on primary.
-func NewWriteFallback(primary *Backend, cli *CLIBackend) *WriteFallback {
-	return &WriteFallback{primary: primary, cli: cli}
+// NewCLIFallback wraps primary so reads fall back to cli on ErrNotFound and
+// writes/deletes fall back to cli on a permission-denied (403) response.
+func NewCLIFallback(primary *Backend, cli *CLIBackend) *CLIFallback {
+	return &CLIFallback{primary: primary, cli: cli}
 }
 
-func (w *WriteFallback) Name() string { return w.primary.Name() }
+func (w *CLIFallback) Name() string { return w.primary.Name() }
 
-func (w *WriteFallback) Read(ctx context.Context, key string) ([]byte, error) {
-	return w.primary.Read(ctx, key)
+func (w *CLIFallback) Read(ctx context.Context, key string) ([]byte, error) {
+	data, err := w.primary.Read(ctx, key)
+	if errors.Is(err, backend.ErrNotFound) {
+		return w.cli.Read(ctx, key)
+	}
+	return data, err
 }
 
-func (w *WriteFallback) HealthCheck(ctx context.Context) error {
+func (w *CLIFallback) HealthCheck(ctx context.Context) error {
 	return w.primary.HealthCheck(ctx)
 }
 
-func (w *WriteFallback) Write(ctx context.Context, key string, data []byte) error {
+func (w *CLIFallback) Write(ctx context.Context, key string, data []byte) error {
 	err := w.primary.Write(ctx, key, data)
 	if isPermissionDenied(err) {
 		return w.cli.Write(ctx, key, data)
@@ -40,7 +55,7 @@ func (w *WriteFallback) Write(ctx context.Context, key string, data []byte) erro
 	return err
 }
 
-func (w *WriteFallback) Delete(ctx context.Context, key string) error {
+func (w *CLIFallback) Delete(ctx context.Context, key string) error {
 	err := w.primary.Delete(ctx, key)
 	if isPermissionDenied(err) {
 		return w.cli.Delete(ctx, key)
@@ -55,4 +70,4 @@ func isPermissionDenied(err error) bool {
 }
 
 // Compile-time interface check.
-var _ backend.Backend = (*WriteFallback)(nil)
+var _ backend.Backend = (*CLIFallback)(nil)
