@@ -354,3 +354,122 @@ func TestRefreshAll_CapturesFromLocalActiveSlot(t *testing.T) {
 		t.Errorf("active slot file expected at %s: %v", activeSlotFile(home), err)
 	}
 }
+
+// ─── login --manual (headless, no-browser login) ────────────────────────────
+
+// fakeManualClaude returns a fake `claude` reproducing the real CLI's
+// no-browser fallback protocol: print the authorize URL line, prompt with
+// no trailing newline, read one line from stdin, and either write
+// credentials (on a matching response) or fail like a rejected OAuth code.
+func fakeManualClaude(authURL, wantResponse, credBody string) string {
+	return "echo \"If the browser didn't open, visit: " + authURL + "\"\n" +
+		"printf 'Paste code here if prompted > '\n" +
+		"read -r response\n" +
+		"if [[ \"$response\" != '" + wantResponse + "' ]]; then\n" +
+		"  echo \"Login failed: Request failed with status code 400\" >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"cat > \"$CLAUDE_CONFIG_DIR/.credentials.json\" <<'CRED'\n" +
+		credBody + "\n" +
+		"CRED\n"
+}
+
+// TestLoginManual_StartReturnsImmediately proves the defining property of
+// --manual: the start call (no --code) prints the URL and returns right
+// away even though the fake claude it launched is still blocked reading a
+// response that never arrives in this test — a login process is not
+// waited on.
+func TestLoginManual_StartReturnsImmediately(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-start"
+	fakeBin(t, bins, "claude", fakeManualClaude(authURL, "whatever-it-will-never-get",
+		`{"claudeAiOauth":{"accessToken":"unused","refreshToken":"RT","expiresAt":99999999999999}}`))
+
+	done := make(chan string, 1)
+	go func() {
+		out, _ := capture(t, func() error {
+			return run(t, "login", "--only", aliceID, "--manual")
+		})
+		done <- out
+	}()
+
+	select {
+	case out := <-done:
+		if !strings.Contains(out, authURL) {
+			t.Errorf("output did not relay the authorize URL:\n%s", out)
+		}
+		if !strings.Contains(out, "--code") {
+			t.Errorf("output did not point at the finish step:\n%s", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("login --manual (start) did not return promptly — it must not wait for the login process")
+	}
+}
+
+func TestLoginManual_TwoPhase_FinishCompletesLogin(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-two-phase"
+	const response = "cli-code#cli-state"
+	fakeBin(t, bins, "claude", fakeManualClaude(authURL, response,
+		`{"claudeAiOauth":{"accessToken":"manual-cli-AT","refreshToken":"RT","expiresAt":99999999999999}}`))
+
+	startOut, err := capture(t, func() error {
+		return run(t, "login", "--only", aliceID, "--manual")
+	})
+	if err != nil {
+		t.Fatalf("login --manual (start): %v\noutput:\n%s", err, startOut)
+	}
+	if !strings.Contains(startOut, authURL) {
+		t.Fatalf("start output did not relay the authorize URL:\n%s", startOut)
+	}
+
+	if err := run(t, "login", "--only", aliceID, "--manual", "--code", response); err != nil {
+		t.Fatalf("login --manual --code (finish): %v", err)
+	}
+	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
+	if !strings.Contains(got, "manual-cli-AT") {
+		t.Fatalf("login --manual did not store the captured credentials:\n%s", got)
+	}
+}
+
+func TestLoginManual_FinishWithoutStart(t *testing.T) {
+	home := newTestHome(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	if err := run(t, "login", "--only", aliceID, "--manual", "--code", "x#y"); err == nil {
+		t.Fatal("expected an error finishing a login that was never started")
+	}
+}
+
+func TestLoginManual_RequiresOnly(t *testing.T) {
+	home := newTestHome(t)
+	alice := "alice@example.com"
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, account.HashEmail(alice), alice)
+
+	if err := run(t, "login", "--manual"); err == nil {
+		t.Fatal("expected an error: --manual without --only")
+	}
+}
+
+func TestLoginManual_CodeRequiresManual(t *testing.T) {
+	newTestHome(t)
+	if err := run(t, "login", "--code", "x#y"); err == nil {
+		t.Fatal("expected an error: --code without --manual")
+	}
+}

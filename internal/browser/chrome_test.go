@@ -2,6 +2,7 @@ package browser
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -101,5 +102,41 @@ func TestRenderOpenerScript_RoutesURLsToChrome(t *testing.T) {
 	// order. The shell pattern looks like "http://*|https://*)".
 	if !strings.Contains(script, "http://*") || !strings.Contains(script, "https://*") {
 		t.Errorf("script missing one of the URL case patterns:\n%s", script)
+	}
+}
+
+func TestInstallNoOpener_AlwaysFails(t *testing.T) {
+	dir := t.TempDir()
+	if err := InstallNoOpener(dir); err != nil {
+		t.Fatalf("InstallNoOpener: %v", err)
+	}
+	realOpen, names, err := openerNames()
+	if err != nil {
+		t.Fatalf("openerNames: %v", err)
+	}
+	if len(names) == 0 {
+		t.Fatal("openerNames returned no shim names")
+	}
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("shim %s not written: %v", name, err)
+		}
+		if fi.Mode()&0o111 == 0 {
+			t.Errorf("shim %s is not executable: mode=%v", name, fi.Mode())
+		}
+		cmd := exec.Command(path, "https://example.com/should-not-open")
+		if err := cmd.Run(); err == nil {
+			t.Errorf("shim %s exited 0, want a non-zero (always-fail) exit", name)
+		}
+	}
+	// Never routes into the real opener, unlike InstallOpener.
+	body, err := os.ReadFile(filepath.Join(dir, names[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), realOpen) {
+		t.Errorf("no-opener shim references the real system opener %q, it must not", realOpen)
 	}
 }
