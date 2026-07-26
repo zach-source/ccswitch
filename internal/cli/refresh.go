@@ -93,11 +93,22 @@ func newRefreshAllCmd() *cobra.Command {
 func newLoginCmd() *cobra.Command {
 	var only string
 	var force bool
+	var manual bool
+	var code string
 
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Interactively (re-)authenticate accounts with missing or expired credentials",
+		Long: "Interactively (re-)authenticate accounts with missing or expired credentials.\n\n" +
+			"--manual performs the login without ever opening a local browser: it prints\n" +
+			"the OAuth URL for you to open on any device, then waits for the response\n" +
+			"(the \"code#state\" claude's own success page shows) on stdin — or pass\n" +
+			"--code to supply it non-interactively. --manual always targets exactly one\n" +
+			"account, so pair it with --only.",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if code != "" && !manual {
+				return fmt.Errorf("--code requires --manual")
+			}
 			cfg, err := config.Load(config.DefaultPath())
 			if err != nil {
 				return err
@@ -115,14 +126,44 @@ func newLoginCmd() *cobra.Command {
 				return fmt.Errorf("backend not available: %w", err)
 			}
 			// claude 2.x on macOS writes credentials to the login keychain,
-			// not a file under CLAUDE_CONFIG_DIR. LoginRotate captures from
-			// the local backend's active slot when the legacy file is
-			// absent, so the local backend has to be passed in.
+			// not a file under CLAUDE_CONFIG_DIR. LoginRotate/ManualLogin
+			// capture from the local backend's active slot when the legacy
+			// file is absent, so the local backend has to be passed in.
 			localCfg := *cfg
 			localCfg.Backend = autoLocalBackend()
 			local, err := resolveBackend(&localCfg)
 			if err != nil {
 				return fmt.Errorf("local backend not available: %w", err)
+			}
+
+			if manual {
+				if only == "" {
+					return fmt.Errorf("--manual requires --only <hash|email|index> — it logs in to exactly one account")
+				}
+				id := seq.Resolve(only)
+				if id == "" {
+					return fmt.Errorf("no account found matching: %s", only)
+				}
+				acct := seq.Accounts[id]
+				fmt.Printf("Manual login for %s (%s) — no local browser will be opened.\n\n", id, acct.Email)
+
+				data, err := refresh.ManualLogin(cmd.Context(), acct.Email, code, os.Stdin, local, func(url string) {
+					fmt.Println("Open this URL on any device to sign in:")
+					fmt.Println()
+					fmt.Println("  " + url)
+					fmt.Println()
+					if code == "" {
+						fmt.Print("Paste the response here (the code#state claude shows after you approve) > ")
+					}
+				})
+				if err != nil {
+					return err
+				}
+				if err := b.Write(cmd.Context(), account.BackupCredKey(id, acct.Email), data); err != nil {
+					return fmt.Errorf("save credentials: %w", err)
+				}
+				fmt.Printf("\nCredentials saved for %s (%s)\n", id, acct.Email)
+				return nil
 			}
 
 			// --only narrows the sequence to a single account.
@@ -144,6 +185,8 @@ func newLoginCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&only, "only", "", "Log in to a single account (hash|email|index)")
 	cmd.Flags().BoolVar(&force, "force", false, "Re-login every selected account even if its credentials are valid")
+	cmd.Flags().BoolVar(&manual, "manual", false, "Log in without opening a local browser: print the URL and wait for a pasted response")
+	cmd.Flags().StringVar(&code, "code", "", "Supply the pasted response non-interactively (requires --manual)")
 	return cmd
 }
 

@@ -354,3 +354,90 @@ func TestRefreshAll_CapturesFromLocalActiveSlot(t *testing.T) {
 		t.Errorf("active slot file expected at %s: %v", activeSlotFile(home), err)
 	}
 }
+
+// ─── login --manual (headless, no-browser login) ────────────────────────────
+
+// fakeManualClaude returns a fake `claude` reproducing the real CLI's
+// no-browser fallback protocol: print the authorize URL line, prompt with
+// no trailing newline, read one line from stdin, and either write
+// credentials (on a matching response) or fail like a rejected OAuth code.
+func fakeManualClaude(authURL, wantResponse, credBody string) string {
+	return "echo \"If the browser didn't open, visit: " + authURL + "\"\n" +
+		"printf 'Paste code here if prompted > '\n" +
+		"read -r response\n" +
+		"if [[ \"$response\" != '" + wantResponse + "' ]]; then\n" +
+		"  echo \"Login failed: Request failed with status code 400\" >&2\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"cat > \"$CLAUDE_CONFIG_DIR/.credentials.json\" <<'CRED'\n" +
+		credBody + "\n" +
+		"CRED\n"
+}
+
+func TestLoginManual_NonInteractiveCodeFlag(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-test"
+	const response = "cli-code#cli-state"
+	fakeBin(t, bins, "claude", fakeManualClaude(authURL, response,
+		`{"claudeAiOauth":{"accessToken":"manual-cli-AT","refreshToken":"RT","expiresAt":99999999999999}}`))
+
+	out, err := capture(t, func() error {
+		return run(t, "login", "--only", aliceID, "--manual", "--code", response)
+	})
+	if err != nil {
+		t.Fatalf("login --manual --code: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(out, authURL) {
+		t.Errorf("output did not relay the authorize URL:\n%s", out)
+	}
+	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
+	if !strings.Contains(got, "manual-cli-AT") {
+		t.Fatalf("login --manual did not store the captured credentials:\n%s", got)
+	}
+}
+
+func TestLoginManual_InteractiveStdinResponse(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	const authURL = "https://claude.com/cai/oauth/authorize?state=interactive"
+	const response = "typed-code#typed-state"
+	fakeBin(t, bins, "claude", fakeManualClaude(authURL, response,
+		`{"claudeAiOauth":{"accessToken":"manual-interactive-AT","refreshToken":"RT","expiresAt":99999999999999}}`))
+
+	if err := runWithStdin(t, response+"\n", "login", "--only", aliceID, "--manual"); err != nil {
+		t.Fatalf("login --manual (stdin): %v", err)
+	}
+	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
+	if !strings.Contains(got, "manual-interactive-AT") {
+		t.Fatalf("login --manual did not store credentials from the piped response:\n%s", got)
+	}
+}
+
+func TestLoginManual_RequiresOnly(t *testing.T) {
+	home := newTestHome(t)
+	alice := "alice@example.com"
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, account.HashEmail(alice), alice)
+
+	if err := run(t, "login", "--manual"); err == nil {
+		t.Fatal("expected an error: --manual without --only")
+	}
+}
+
+func TestLoginManual_CodeRequiresManual(t *testing.T) {
+	newTestHome(t)
+	if err := run(t, "login", "--code", "x#y"); err == nil {
+		t.Fatal("expected an error: --code without --manual")
+	}
+}
