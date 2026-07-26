@@ -374,7 +374,12 @@ func fakeManualClaude(authURL, wantResponse, credBody string) string {
 		"CRED\n"
 }
 
-func TestLoginManual_NonInteractiveCodeFlag(t *testing.T) {
+// TestLoginManual_StartReturnsImmediately proves the defining property of
+// --manual: the start call (no --code) prints the URL and returns right
+// away even though the fake claude it launched is still blocked reading a
+// response that never arrives in this test — a login process is not
+// waited on.
+func TestLoginManual_StartReturnsImmediately(t *testing.T) {
 	home := newTestHome(t)
 	bins := withFakeBins(t)
 	alice := "alice@example.com"
@@ -382,19 +387,56 @@ func TestLoginManual_NonInteractiveCodeFlag(t *testing.T) {
 	seedClaudeJSON(t, home, alice)
 	seqWith(t, aliceID, alice)
 
-	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-test"
+	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-start"
+	fakeBin(t, bins, "claude", fakeManualClaude(authURL, "whatever-it-will-never-get",
+		`{"claudeAiOauth":{"accessToken":"unused","refreshToken":"RT","expiresAt":99999999999999}}`))
+
+	done := make(chan string, 1)
+	go func() {
+		out, _ := capture(t, func() error {
+			return run(t, "login", "--only", aliceID, "--manual")
+		})
+		done <- out
+	}()
+
+	select {
+	case out := <-done:
+		if !strings.Contains(out, authURL) {
+			t.Errorf("output did not relay the authorize URL:\n%s", out)
+		}
+		if !strings.Contains(out, "--code") {
+			t.Errorf("output did not point at the finish step:\n%s", out)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("login --manual (start) did not return promptly — it must not wait for the login process")
+	}
+}
+
+func TestLoginManual_TwoPhase_FinishCompletesLogin(t *testing.T) {
+	home := newTestHome(t)
+	bins := withFakeBins(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+
+	const authURL = "https://claude.com/cai/oauth/authorize?state=cli-two-phase"
 	const response = "cli-code#cli-state"
 	fakeBin(t, bins, "claude", fakeManualClaude(authURL, response,
 		`{"claudeAiOauth":{"accessToken":"manual-cli-AT","refreshToken":"RT","expiresAt":99999999999999}}`))
 
-	out, err := capture(t, func() error {
-		return run(t, "login", "--only", aliceID, "--manual", "--code", response)
+	startOut, err := capture(t, func() error {
+		return run(t, "login", "--only", aliceID, "--manual")
 	})
 	if err != nil {
-		t.Fatalf("login --manual --code: %v\noutput:\n%s", err, out)
+		t.Fatalf("login --manual (start): %v\noutput:\n%s", err, startOut)
 	}
-	if !strings.Contains(out, authURL) {
-		t.Errorf("output did not relay the authorize URL:\n%s", out)
+	if !strings.Contains(startOut, authURL) {
+		t.Fatalf("start output did not relay the authorize URL:\n%s", startOut)
+	}
+
+	if err := run(t, "login", "--only", aliceID, "--manual", "--code", response); err != nil {
+		t.Fatalf("login --manual --code (finish): %v", err)
 	}
 	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
 	if !strings.Contains(got, "manual-cli-AT") {
@@ -402,25 +444,15 @@ func TestLoginManual_NonInteractiveCodeFlag(t *testing.T) {
 	}
 }
 
-func TestLoginManual_InteractiveStdinResponse(t *testing.T) {
+func TestLoginManual_FinishWithoutStart(t *testing.T) {
 	home := newTestHome(t)
-	bins := withFakeBins(t)
 	alice := "alice@example.com"
 	aliceID := account.HashEmail(alice)
 	seedClaudeJSON(t, home, alice)
 	seqWith(t, aliceID, alice)
 
-	const authURL = "https://claude.com/cai/oauth/authorize?state=interactive"
-	const response = "typed-code#typed-state"
-	fakeBin(t, bins, "claude", fakeManualClaude(authURL, response,
-		`{"claudeAiOauth":{"accessToken":"manual-interactive-AT","refreshToken":"RT","expiresAt":99999999999999}}`))
-
-	if err := runWithStdin(t, response+"\n", "login", "--only", aliceID, "--manual"); err != nil {
-		t.Fatalf("login --manual (stdin): %v", err)
-	}
-	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
-	if !strings.Contains(got, "manual-interactive-AT") {
-		t.Fatalf("login --manual did not store credentials from the piped response:\n%s", got)
+	if err := run(t, "login", "--only", aliceID, "--manual", "--code", "x#y"); err == nil {
+		t.Fatal("expected an error finishing a login that was never started")
 	}
 }
 

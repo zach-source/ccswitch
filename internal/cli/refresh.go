@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -100,11 +101,15 @@ func newLoginCmd() *cobra.Command {
 		Use:   "login",
 		Short: "Interactively (re-)authenticate accounts with missing or expired credentials",
 		Long: "Interactively (re-)authenticate accounts with missing or expired credentials.\n\n" +
-			"--manual performs the login without ever opening a local browser: it prints\n" +
-			"the OAuth URL for you to open on any device, then waits for the response\n" +
-			"(the \"code#state\" claude's own success page shows) on stdin — or pass\n" +
-			"--code to supply it non-interactively. --manual always targets exactly one\n" +
-			"account, so pair it with --only.",
+			"--manual performs the login without ever opening a local browser, as two steps:\n" +
+			"  1. ccswitch login --only <id> --manual\n" +
+			"     Prints the OAuth URL to open on any device, and returns immediately —\n" +
+			"     nothing stays blocked waiting for you.\n" +
+			"  2. ccswitch login --only <id> --manual --code \"<code#state>\"\n" +
+			"     After approving in step 1's URL, finishes the login with the response\n" +
+			"     its success page shows (a separate command, possibly a separate\n" +
+			"     terminal or process entirely).\n" +
+			"--manual always targets exactly one account, so pair it with --only.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if code != "" && !manual {
 				return fmt.Errorf("--code requires --manual")
@@ -145,24 +150,33 @@ func newLoginCmd() *cobra.Command {
 					return fmt.Errorf("no account found matching: %s", only)
 				}
 				acct := seq.Accounts[id]
-				fmt.Printf("Manual login for %s (%s) — no local browser will be opened.\n\n", id, acct.Email)
+				stateDir := filepath.Join(backupDir(), "pending-login-"+id)
 
-				data, err := refresh.ManualLogin(cmd.Context(), acct.Email, code, os.Stdin, local, func(url string) {
+				if code == "" {
+					// Step 1: start, print the URL, return immediately —
+					// nothing here waits on a response.
+					url, err := refresh.ManualLoginStart(cmd.Context(), acct.Email, stateDir, local)
+					if err != nil {
+						return err
+					}
+					fmt.Printf("Manual login started for %s (%s) — no local browser will be opened.\n\n", id, acct.Email)
 					fmt.Println("Open this URL on any device to sign in:")
 					fmt.Println()
 					fmt.Println("  " + url)
 					fmt.Println()
-					if code == "" {
-						fmt.Print("Paste the response here (the code#state claude shows after you approve) > ")
-					}
-				})
+					fmt.Printf("Then finish with:\n  ccswitch login --only %s --manual --code \"<code#state>\"\n", id)
+					return nil
+				}
+
+				// Step 2: finish a login a prior --manual call started.
+				data, err := refresh.ManualLoginFinish(cmd.Context(), stateDir, code, local)
 				if err != nil {
 					return err
 				}
 				if err := b.Write(cmd.Context(), account.BackupCredKey(id, acct.Email), data); err != nil {
 					return fmt.Errorf("save credentials: %w", err)
 				}
-				fmt.Printf("\nCredentials saved for %s (%s)\n", id, acct.Email)
+				fmt.Printf("Credentials saved for %s (%s)\n", id, acct.Email)
 				return nil
 			}
 
