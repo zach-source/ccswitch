@@ -84,21 +84,35 @@ func TestUsage_NoCcusageInstalled(t *testing.T) {
 
 // ─── refresh-all / login (mock claude) ──────────────────────────────────────
 
+// fakeTokenEndpoint stands up an OAuth token endpoint and points ccswitch at
+// it via CLAUDE_CODE_CUSTOM_OAUTH_URL — the same override a staging user
+// would set. httptest serves on loopback, which the transport check allows.
+func fakeTokenEndpoint(t *testing.T, status int, body string) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/oauth/token" {
+			t.Errorf("token request to %s, want /v1/oauth/token", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		_, _ = io.WriteString(w, body)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("CLAUDE_CODE_CUSTOM_OAUTH_URL", srv.URL)
+}
+
 func TestRefreshAll_RefreshesExpiredAccount(t *testing.T) {
 	home := newTestHome(t)
-	bins := withFakeBins(t)
 	alice := "alice@example.com"
 	aliceID := account.HashEmail(alice)
 	seedClaudeJSON(t, home, alice)
 	seqWith(t, aliceID, alice)
 
-	// The fresh blob carries an unmodeled field — proving refresh persists
-	// the credential file's raw bytes, not a re-marshaled struct.
-	fakeBin(t, bins, "claude", fakeClaudeWriting(
-		`{"claudeAiOauth":{"accessToken":"fresh-AT","refreshToken":"fresh-RT","expiresAt":99999999999999},"futureField":"preserved"}`))
+	fakeTokenEndpoint(t, 200, `{"access_token":"fresh-AT","refresh_token":"fresh-RT","expires_in":3600}`)
 
-	// An expired backup credential (1970 expiry) with a refresh token.
-	expired := []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1}}`)
+	// The stored blob carries an unmodeled field and account-independent MCP
+	// state — proving refresh splices into the raw bytes rather than
+	// rebuilding them from the typed struct.
+	expired := []byte(`{"mcpOAuth":{"srv":"tok"},"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1,"futureField":"preserved"}}`)
 	seedCred(t, home, account.BackupCredKey(aliceID, alice), expired)
 
 	if err := run(t, "refresh-all"); err != nil {
@@ -111,18 +125,42 @@ func TestRefreshAll_RefreshesExpiredAccount(t *testing.T) {
 	if !strings.Contains(got, "futureField") {
 		t.Fatalf("refresh dropped an unmodeled field — data loss:\n%s", got)
 	}
+	if !strings.Contains(got, "mcpOAuth") {
+		t.Fatalf("refresh dropped account-independent MCP state:\n%s", got)
+	}
+}
+
+// refresh-all must work with no `claude` binary on PATH at all: it is the
+// unattended path (cron, launchd, the daemon) and speaks OAuth directly.
+func TestRefreshAll_NeedsNoClaudeBinary(t *testing.T) {
+	home := newTestHome(t)
+	alice := "alice@example.com"
+	aliceID := account.HashEmail(alice)
+	seedClaudeJSON(t, home, alice)
+	seqWith(t, aliceID, alice)
+	t.Setenv("PATH", t.TempDir()) // empty PATH: no claude anywhere
+
+	fakeTokenEndpoint(t, 200, `{"access_token":"fresh-AT","expires_in":3600}`)
+	seedCred(t, home, account.BackupCredKey(aliceID, alice),
+		[]byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1}}`))
+
+	if err := run(t, "refresh-all"); err != nil {
+		t.Fatalf("refresh-all: %v", err)
+	}
+	if got := string(readCred(t, home, account.BackupCredKey(aliceID, alice))); !strings.Contains(got, "fresh-AT") {
+		t.Fatalf("account was not refreshed without a claude binary:\n%s", got)
+	}
 }
 
 func TestRefreshAll_ReportsFailureExitCode(t *testing.T) {
 	home := newTestHome(t)
-	bins := withFakeBins(t)
 	alice := "alice@example.com"
 	aliceID := account.HashEmail(alice)
 	seedClaudeJSON(t, home, alice)
 	seqWith(t, aliceID, alice)
 
-	// A claude that fails — RefreshOne cannot produce fresh credentials.
-	fakeBin(t, bins, "claude", `echo "auth failed" >&2; exit 1`)
+	// A dead refresh token — the endpoint rejects the grant.
+	fakeTokenEndpoint(t, 400, `{"error":"invalid_grant"}`)
 	seedCred(t, home, account.BackupCredKey(aliceID, alice),
 		[]byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1}}`))
 
@@ -321,36 +359,3 @@ func TestLogin_NoCredsWhenClaudeWritesNothing(t *testing.T) {
 	}
 }
 
-func TestRefreshAll_CapturesFromLocalActiveSlot(t *testing.T) {
-	home := newTestHome(t)
-	bins := withFakeBins(t)
-	alice := "alice@example.com"
-	aliceID := account.HashEmail(alice)
-	seedClaudeJSON(t, home, alice)
-	seqWith(t, aliceID, alice)
-
-	// fake claude writes to the local active slot (macOS-keychain
-	// equivalent) AND carries an unmodeled field, so this test also
-	// regresses the raw-bytes persistence rule.
-	fakeBin(t, bins, "claude", fakeClaudeWritingToActiveSlot(
-		`{"claudeAiOauth":{"accessToken":"fresh-via-keychain","refreshToken":"fresh-RT","expiresAt":99999999999999},"futureField":"preserved"}`))
-
-	// An expired backup credential so refresh-all takes the refresh branch.
-	expired := []byte(`{"claudeAiOauth":{"accessToken":"old","refreshToken":"old-RT","expiresAt":1}}`)
-	seedCred(t, home, account.BackupCredKey(aliceID, alice), expired)
-
-	if err := run(t, "refresh-all"); err != nil {
-		t.Fatalf("refresh-all: %v", err)
-	}
-	got := string(readCred(t, home, account.BackupCredKey(aliceID, alice)))
-	if !strings.Contains(got, "fresh-via-keychain") {
-		t.Fatalf("refresh-all did not capture from the local active slot:\n%s", got)
-	}
-	if !strings.Contains(got, "futureField") {
-		t.Fatalf("refresh dropped an unmodeled field — data loss:\n%s", got)
-	}
-	// Sanity: the helper resolves the same path the local backend uses.
-	if _, err := os.Stat(activeSlotFile(home)); err != nil {
-		t.Errorf("active slot file expected at %s: %v", activeSlotFile(home), err)
-	}
-}

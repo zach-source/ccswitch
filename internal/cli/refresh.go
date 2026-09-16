@@ -61,17 +61,6 @@ func newRefreshAllCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
-			// claude 2.x on macOS writes refreshed credentials to the local
-			// keychain, not to CLAUDE_CONFIG_DIR. RefreshOne captures from
-			// the local active slot when the file is absent, so the local
-			// backend has to be passed in.
-			localCfg := *cfg
-			localCfg.Backend = autoLocalBackend()
-			local, err := resolveBackend(&localCfg)
-			if err != nil {
-				return fmt.Errorf("local backend not available: %w", err)
-			}
-
 			ctx := cmd.Context()
 
 			// Mirror ccswitch.sh step 1: snapshot the active account's live
@@ -79,7 +68,7 @@ func newRefreshAllCmd() *cobra.Command {
 			// active account is never reported as stale.
 			syncActiveToBackup(ctx, b, seq)
 
-			n, err := refresh.RefreshAll(ctx, seq, b, local, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
+			n, err := refresh.RefreshAll(ctx, seq, b, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
 			// Print the summary either way, then surface any partial-failure
 			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)

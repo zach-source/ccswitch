@@ -33,14 +33,14 @@ func TestReadAccountCred_StoreVsLocal(t *testing.T) {
 	}
 
 	// Active account: prefers the local active slot.
-	if c := readAccountCred(ctx, store, local, true, id, email); c == nil {
+	if _, c := readAccountCred(ctx, store, local, true, id, email); c == nil {
 		t.Fatal("active account returned no credential (the reported bug)")
 	} else if c.ClaudeAIOAuth.AccessToken != "live-AT" {
 		t.Errorf("active account token = %q, want live-AT", c.ClaudeAIOAuth.AccessToken)
 	}
 
 	// Non-active account: reads the store backup key.
-	if c := readAccountCred(ctx, store, local, false, id, email); c == nil {
+	if _, c := readAccountCred(ctx, store, local, false, id, email); c == nil {
 		t.Fatal("non-active account returned no credential")
 	} else if c.ClaudeAIOAuth.AccessToken != "backup-AT" {
 		t.Errorf("non-active account token = %q, want backup-AT", c.ClaudeAIOAuth.AccessToken)
@@ -48,7 +48,7 @@ func TestReadAccountCred_StoreVsLocal(t *testing.T) {
 
 	// Active account with an empty local slot falls back to the store backup.
 	emptyLocal := inmem.New()
-	if c := readAccountCred(ctx, store, emptyLocal, true, id, email); c == nil {
+	if _, c := readAccountCred(ctx, store, emptyLocal, true, id, email); c == nil {
 		t.Fatal("active account with empty local slot should fall back to store backup")
 	} else if c.ClaudeAIOAuth.AccessToken != "backup-AT" {
 		t.Errorf("fallback token = %q, want backup-AT", c.ClaudeAIOAuth.AccessToken)

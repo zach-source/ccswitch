@@ -163,7 +163,7 @@ func LoginRotate(
 
 		// LoginRotate does not seed .credentials.json, so any file that
 		// appears at the legacy path came from claude.
-		newData, hashedSvc := captureClaudeCredential(ctx, tmpConfig, nil, local, beforeData, since)
+		newData, hashedSvc := captureClaudeCredential(ctx, tmpConfig, local, beforeData, since)
 
 		_ = os.RemoveAll(tmpConfig)
 		_ = os.RemoveAll(tmpWork)
@@ -239,11 +239,9 @@ type hashedSlotLookup interface {
 // only when) the credential was captured from source 3; it is "" for
 // sources 1 and 2. The caller deletes that service after persisting the
 // credential so the orphaned login-capture record does not accumulate.
-func captureClaudeCredential(ctx context.Context, tmpConfig string, seedData []byte, local backend.Backend, beforeLocal []byte, since time.Time) ([]byte, string) {
+func captureClaudeCredential(ctx context.Context, tmpConfig string, local backend.Backend, beforeLocal []byte, since time.Time) ([]byte, string) {
 	if data, err := os.ReadFile(filepath.Join(tmpConfig, ".credentials.json")); err == nil && len(data) > 0 {
-		if !bytes.Equal(data, seedData) {
-			return data, ""
-		}
+		return data, ""
 	}
 	if local == nil {
 		return nil, ""
@@ -294,4 +292,26 @@ func prependPath(env []string, dir string) []string {
 		}
 	}
 	return append(env, "PATH="+dir)
+}
+
+// filteredEnv returns os.Environ() with the Claude OAuth override variables
+// stripped. CLAUDE_CONFIG_DIR is removed so the isolated dir set by the caller
+// wins; the token variables are removed because an inherited refresh token
+// would make `claude auth login` silently renew that token instead of running
+// the browser flow, logging the user in as the wrong account.
+func filteredEnv() []string {
+	blocked := map[string]bool{
+		"CLAUDE_CONFIG_DIR":               true,
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN": true,
+		"CLAUDE_CODE_OAUTH_SCOPES":        true,
+	}
+	env := os.Environ()
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		key, _, _ := strings.Cut(kv, "=")
+		if !blocked[key] {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
