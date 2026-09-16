@@ -145,9 +145,7 @@ func usageRows(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence) ([
 	if err != nil {
 		return nil, fmt.Errorf("resolve backend: %w", err)
 	}
-	localCfg := *cfg
-	localCfg.Backend = autoLocalBackend()
-	local, err := resolveBackend(&localCfg)
+	local, err := resolveLocalBackend()
 	if err != nil {
 		return nil, fmt.Errorf("resolve local backend: %w", err)
 	}
@@ -273,9 +271,7 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	if err != nil {
 		return fmt.Errorf("resolve backend: %w", err)
 	}
-	localCfg := *cfg
-	localCfg.Backend = autoLocalBackend()
-	local, err := resolveBackend(&localCfg)
+	local, err := resolveLocalBackend()
 	if err != nil {
 		return fmt.Errorf("resolve local backend: %w", err)
 	}

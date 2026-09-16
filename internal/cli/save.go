@@ -50,9 +50,7 @@ func newSaveCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
-			localCfg := *cfg
-			localCfg.Backend = autoLocalBackend()
-			local, err := resolveBackend(&localCfg)
+			local, err := resolveLocalBackend()
 			if err != nil {
 				return fmt.Errorf("local backend not available: %w", err)
 			}

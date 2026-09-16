@@ -275,9 +275,7 @@ func newUsageAllCmd() *cobra.Command {
 			// claude 2.x on macOS refreshes expired tokens into the local
 			// keychain, not via CLAUDE_CONFIG_DIR. Pass the local backend
 			// so RefreshOne can capture from the active slot when needed.
-			localCfg := *cfg
-			localCfg.Backend = autoLocalBackend()
-			local, err := resolveBackend(&localCfg)
+			local, err := resolveLocalBackend()
 			if err != nil {
 				return fmt.Errorf("local backend not available: %w", err)
 			}

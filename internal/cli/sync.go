@@ -63,9 +63,7 @@ func newEngine(cmd *cobra.Command, cfg *config.Config) (*syncpkg.Engine, error) 
 		return nil, fmt.Errorf("backend health check: %w", err)
 	}
 
-	localCfg := *cfg
-	localCfg.Backend = autoLocalBackend()
-	local, err := resolveBackend(&localCfg)
+	local, err := resolveLocalBackend()
 	if err != nil {
 		return nil, fmt.Errorf("resolve local backend: %w", err)
 	}

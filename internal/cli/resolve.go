@@ -172,6 +172,14 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// resolveLocalBackend returns the backend holding the *active* slot — the
+// credential `claude` itself reads. That is always local (keychain on macOS,
+// file elsewhere) regardless of where per-account backups are configured to
+// live, so it deliberately ignores cfg.Backend.
+func resolveLocalBackend() (backend.Backend, error) {
+	return resolveBackend(&config.Config{Backend: autoLocalBackend()})
+}
+
 // resolveBackend returns the Backend implementation for the effective type.
 // "auto" picks keychain on macOS, file elsewhere.
 func resolveBackend(cfg *config.Config) (backend.Backend, error) {

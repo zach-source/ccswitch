@@ -66,9 +66,7 @@ func newRefreshAllCmd() *cobra.Command {
 			// keychain, not to CLAUDE_CONFIG_DIR. RefreshOne captures from
 			// the local active slot when the file is absent, so the local
 			// backend has to be passed in.
-			localCfg := *cfg
-			localCfg.Backend = autoLocalBackend()
-			local, err := resolveBackend(&localCfg)
+			local, err := resolveLocalBackend()
 			if err != nil {
 				return fmt.Errorf("local backend not available: %w", err)
 			}
@@ -134,9 +132,7 @@ func newLoginCmd() *cobra.Command {
 			// not a file under CLAUDE_CONFIG_DIR. LoginRotate/ManualLogin
 			// capture from the local backend's active slot when the legacy
 			// file is absent, so the local backend has to be passed in.
-			localCfg := *cfg
-			localCfg.Backend = autoLocalBackend()
-			local, err := resolveBackend(&localCfg)
+			local, err := resolveLocalBackend()
 			if err != nil {
 				return fmt.Errorf("local backend not available: %w", err)
 			}
