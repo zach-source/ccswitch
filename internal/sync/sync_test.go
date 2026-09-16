@@ -79,7 +79,7 @@ func TestPush_LocalOnly(t *testing.T) {
 	writeCred(t, local, id, email, now)
 
 	e := newEngine(local, remote, seq)
-	res, err := e.Push(context.Background())
+	res, err := e.Push(context.Background(), false)
 	if err != nil {
 		t.Fatalf("Push: %v", err)
 	}

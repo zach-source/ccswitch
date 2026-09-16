@@ -102,8 +102,20 @@ func (e *Engine) Run(ctx context.Context) (Result, error) {
 	return res, nil
 }
 
-// Push copies every account from local → remote, overwriting remote state.
-func (e *Engine) Push(ctx context.Context) (Result, error) {
+// Push copies every account from local → remote.
+//
+// A credential is skipped when the remote copy is strictly fresher (later
+// expiresAt) than the local one, unless force is set. Refresh tokens rotate
+// and the server detects reuse: if another machine refreshed an account, the
+// local copy holds a superseded refresh token, and pushing it over the good
+// one strands every machine on a token the server will reject — recoverable
+// only by an interactive re-login. Sequence metadata is unaffected by
+// rotation and is always pushed.
+//
+// force exists because the guard is a heuristic: a local credential can be
+// legitimately older yet correct, e.g. after restoring a machine from backup
+// or deliberately reverting a bad remote write.
+func (e *Engine) Push(ctx context.Context, force bool) (Result, error) {
 	var res Result
 
 	// Push sequence metadata (strip switchLog, matching bash behaviour).
@@ -132,6 +144,16 @@ func (e *Engine) Push(ctx context.Context) (Result, error) {
 			res.Errors++
 			continue
 		}
+		if !force {
+			if stale, remoteExp, localExp := e.remoteIsFresher(ctx, key, data); stale {
+				e.log.Warn("push: remote credential is fresher, skipping",
+					"id", id, "email", acct.Email,
+					"local_expires_at", localExp, "remote_expires_at", remoteExp,
+					"hint", "another machine refreshed this account; pull first, or --force to overwrite")
+				res.Unchanged++
+				continue
+			}
+		}
 		if err := e.remote.Write(ctx, key, data); err != nil {
 			e.log.Error("push: write remote failed", "id", id, "err", err)
 			res.Errors++
@@ -140,8 +162,34 @@ func (e *Engine) Push(ctx context.Context) (Result, error) {
 		res.Pushed++
 	}
 
-	e.log.Info("push: complete", "pushed", res.Pushed, "errors", res.Errors)
+	e.log.Info("push: complete", "pushed", res.Pushed, "skipped", res.Unchanged, "errors", res.Errors)
 	return res, nil
+}
+
+// remoteIsFresher reports whether the stored remote credential at key has a
+// strictly later expiresAt than local, and returns both timestamps for the
+// log line.
+//
+// It fails open: a missing, unreadable or unparseable value on either side
+// yields false, so a push is never blocked by the guard being unable to make
+// a comparison. The risk it defends against — replaying a superseded refresh
+// token — only exists when there IS a readable, fresher remote credential.
+func (e *Engine) remoteIsFresher(ctx context.Context, key string, local []byte) (bool, int64, int64) {
+	remoteData, err := e.remote.Read(ctx, key)
+	if err != nil || len(remoteData) == 0 {
+		return false, 0, 0
+	}
+	remoteCred, err := credentials.Parse(remoteData)
+	if err != nil {
+		return false, 0, 0
+	}
+	localCred, err := credentials.Parse(local)
+	if err != nil {
+		return false, 0, 0
+	}
+	r := remoteCred.ClaudeAIOAuth.ExpiresAtMillis
+	l := localCred.ClaudeAIOAuth.ExpiresAtMillis
+	return r > l, r, l
 }
 
 // Pull copies every account from remote → local, overwriting local state.
