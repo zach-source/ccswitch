@@ -181,11 +181,13 @@ func resolveLocalBackend() (backend.Backend, error) {
 }
 
 // resolveBackend returns the Backend implementation for the effective type.
-// "auto" picks keychain on macOS, file elsewhere.
+// "auto" means files — see autoStoreBackend for why that differs from the
+// active slot, which resolveLocalBackend handles.
 func resolveBackend(cfg *config.Config) (backend.Backend, error) {
 	typ := cfg.Backend
 	if typ == backend.TypeAuto {
-		typ = autoLocalBackend()
+		typ = autoStoreBackend()
+		migrateKeychainBackups()
 	}
 	switch typ {
 	case backend.TypeFile:

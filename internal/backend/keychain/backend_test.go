@@ -5,6 +5,7 @@ package keychain_test
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -12,10 +13,30 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
 )
 
-// These tests exercise the real macOS Security.framework. They require the
-// test binary to be entitled to access the login keychain (true for local
-// `go test` runs; may be skipped in sandboxed CI).
+// requireRealKeychain gates every test in this file behind an opt-in.
+//
+// These tests hit the real login keychain, and `go test` compiles a fresh
+// binary with a fresh code-signing hash on every run. That hash is in no
+// keychain item's access-control list, so each run makes macOS raise a
+// password prompt per item touched — and the prompts queue, so a few `go
+// test ./...` runs in a row leave a stack of dialogs behind that looks like
+// an infinite loop to whoever has to dismiss them.
+//
+// `make check` must stay hermetic. Run these deliberately with:
+//
+//	CCSWITCH_KEYCHAIN_TESTS=1 go test ./internal/backend/keychain/
+//
+// Granting "Always Allow" once per run does not help: the next build has a
+// different hash and starts over.
+func requireRealKeychain(t *testing.T) {
+	t.Helper()
+	if os.Getenv("CCSWITCH_KEYCHAIN_TESTS") != "1" {
+		t.Skip("set CCSWITCH_KEYCHAIN_TESTS=1 to exercise the real login keychain")
+	}
+}
+
 func TestBackend_ReadWriteDelete(t *testing.T) {
+	requireRealKeychain(t)
 	ctx := context.Background()
 	b := keychain.New()
 
@@ -80,6 +101,7 @@ func TestBackend_ReadWriteDelete(t *testing.T) {
 }
 
 func TestBackend_HealthCheck(t *testing.T) {
+	requireRealKeychain(t)
 	b := keychain.New()
 	if err := b.HealthCheck(context.Background()); err != nil {
 		t.Errorf("HealthCheck: %v", err)
@@ -100,6 +122,7 @@ var _ backend.Backend = (*keychain.Backend)(nil)
 // hashed slots like that when CLAUDE_CONFIG_DIR is set; ccswitch enumerates
 // to capture them because the hash is opaque.
 func TestBackend_LookupHashedActiveSlot(t *testing.T) {
+	requireRealKeychain(t)
 	ctx := context.Background()
 	b := keychain.New()
 

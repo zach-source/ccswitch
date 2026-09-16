@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	"github.com/zach-source/ccswitch/internal/account"
 )
 
 func init() {
@@ -15,7 +16,7 @@ func init() {
 // hashedSlotLister is implemented by the macOS keychain backend. Other
 // backends cannot accumulate these records, so prune is a no-op there.
 type hashedSlotLister interface {
-	ListHashedSlots(ctx context.Context) ([]string, error)
+	ListByPrefix(ctx context.Context, prefix string) ([]string, error)
 	Delete(ctx context.Context, key string) error
 }
 
@@ -55,7 +56,7 @@ func newPruneCmd() *cobra.Command {
 
 // runPrune lists, and with apply set deletes, every orphaned hashed slot.
 func runPrune(ctx context.Context, lister hashedSlotLister, apply bool) error {
-	slots, err := lister.ListHashedSlots(ctx)
+	slots, err := lister.ListByPrefix(ctx, account.ActiveCredKey+"-")
 	if err != nil {
 		return fmt.Errorf("list orphaned records: %w", err)
 	}

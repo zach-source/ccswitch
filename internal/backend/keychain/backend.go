@@ -202,16 +202,15 @@ func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) (
 // trailing dash makes the match unambiguous.
 const hashedSlotPrefix = account.ActiveCredKey + "-"
 
-// ListHashedSlots returns the service names of every per-CLAUDE_CONFIG_DIR
-// "Claude Code-credentials-<hash>" keychain record, oldest first.
+// ListByPrefix returns the service names of every generic-password item
+// whose service starts with prefix, oldest-modified first.
 //
-// Each interactive login leaves one of these behind: the hash is opaque and
-// changes between runs, so ccswitch cannot address the record directly and
-// instead captures from it and deletes it. Logins performed before that
-// cleanup existed — and any whose delete failed — leave records that never go
-// away, each one a separate keychain item with its own access-control list.
-// `ccswitch prune` uses this to clear them.
-func (b *Backend) ListHashedSlots(_ context.Context) ([]string, error) {
+// Two callers need it, both because the exact service name is not knowable in
+// advance: `ccswitch prune` clears orphaned "Claude Code-credentials-<hash>"
+// login-capture records (opaque hash), and the one-time backup migration
+// finds every "Claude Code-Account-<id>-<email>" item without consulting
+// sequence.json.
+func (b *Backend) ListByPrefix(_ context.Context, prefix string) ([]string, error) {
 	acct, err := currentUser()
 	if err != nil {
 		return nil, err
@@ -233,7 +232,7 @@ func (b *Backend) ListHashedSlots(_ context.Context) ([]string, error) {
 
 	matches := make([]gokeychain.QueryResult, 0, len(results))
 	for _, r := range results {
-		if strings.HasPrefix(r.Service, hashedSlotPrefix) {
+		if strings.HasPrefix(r.Service, prefix) {
 			matches = append(matches, r)
 		}
 	}

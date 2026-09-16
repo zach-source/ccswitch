@@ -17,7 +17,7 @@ type fakeLister struct {
 	deleted []string
 }
 
-func (f *fakeLister) ListHashedSlots(context.Context) ([]string, error) { return f.slots, nil }
+func (f *fakeLister) ListByPrefix(context.Context, string) ([]string, error) { return f.slots, nil }
 
 func (f *fakeLister) Delete(_ context.Context, key string) error {
 	f.deleted = append(f.deleted, key)

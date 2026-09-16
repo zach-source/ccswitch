@@ -47,9 +47,8 @@ func (b *Backend) LookupHashedActiveSlot(_ context.Context, _ time.Time) ([]byte
 	return nil, "", ErrNotSupported
 }
 
-// ListHashedSlots is unsupported on non-Darwin platforms — claude 2.x's
-// per-CLAUDE_CONFIG_DIR hashed keychain item is a macOS-only mechanism.
-func (b *Backend) ListHashedSlots(_ context.Context) ([]string, error) {
+// ListByPrefix is unsupported on non-Darwin platforms.
+func (b *Backend) ListByPrefix(_ context.Context, _ string) ([]string, error) {
 	return nil, ErrNotSupported
 }
 
