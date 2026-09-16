@@ -9,11 +9,13 @@ import (
 	"context"
 	"fmt"
 	"os/user"
+	"sort"
 	"strings"
 	"time"
 
 	gokeychain "github.com/keybase/go-keychain"
 
+	"github.com/zach-source/ccswitch/internal/account"
 	"github.com/zach-source/ccswitch/internal/backend"
 )
 
@@ -172,7 +174,7 @@ func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) (
 	var newestMdat time.Time
 	var found bool
 	for _, r := range results {
-		if !strings.HasPrefix(r.Service, "Claude Code-credentials-") {
+		if !strings.HasPrefix(r.Service, hashedSlotPrefix) {
 			continue
 		}
 		if r.ModificationDate.Before(floor) {
@@ -192,6 +194,58 @@ func (b *Backend) LookupHashedActiveSlot(ctx context.Context, since time.Time) (
 		return nil, "", err
 	}
 	return data, newestSvc, nil
+}
+
+// hashedSlotPrefix is the service-name prefix claude 2.x uses for the
+// per-CLAUDE_CONFIG_DIR credential record: "Claude Code-credentials-<8hex>".
+// The real active slot is "Claude Code-credentials" with no suffix, so the
+// trailing dash makes the match unambiguous.
+const hashedSlotPrefix = account.ActiveCredKey + "-"
+
+// ListHashedSlots returns the service names of every per-CLAUDE_CONFIG_DIR
+// "Claude Code-credentials-<hash>" keychain record, oldest first.
+//
+// Each interactive login leaves one of these behind: the hash is opaque and
+// changes between runs, so ccswitch cannot address the record directly and
+// instead captures from it and deletes it. Logins performed before that
+// cleanup existed — and any whose delete failed — leave records that never go
+// away, each one a separate keychain item with its own access-control list.
+// `ccswitch prune` uses this to clear them.
+func (b *Backend) ListHashedSlots(_ context.Context) ([]string, error) {
+	acct, err := currentUser()
+	if err != nil {
+		return nil, err
+	}
+
+	q := gokeychain.NewItem()
+	q.SetSecClass(gokeychain.SecClassGenericPassword)
+	q.SetAccount(acct)
+	q.SetMatchLimit(gokeychain.MatchLimitAll)
+	q.SetReturnAttributes(true)
+
+	results, err := gokeychain.QueryItem(q)
+	if err != nil {
+		if err == gokeychain.ErrorItemNotFound { //nolint:errorlint
+			return nil, nil
+		}
+		return nil, fmt.Errorf("keychain backend: enumerate generic passwords: %w", err)
+	}
+
+	matches := make([]gokeychain.QueryResult, 0, len(results))
+	for _, r := range results {
+		if strings.HasPrefix(r.Service, hashedSlotPrefix) {
+			matches = append(matches, r)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		return matches[i].ModificationDate.Before(matches[j].ModificationDate)
+	})
+
+	out := make([]string, len(matches))
+	for i, r := range matches {
+		out[i] = r.Service
+	}
+	return out, nil
 }
 
 // HealthCheck verifies that the keychain is accessible by performing a

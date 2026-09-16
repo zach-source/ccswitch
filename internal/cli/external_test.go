@@ -358,4 +358,3 @@ func TestLogin_NoCredsWhenClaudeWritesNothing(t *testing.T) {
 		t.Fatalf("login stored creds despite claude writing nothing:\n%s", got)
 	}
 }
-
