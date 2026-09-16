@@ -112,8 +112,8 @@ func TestSwitchTo_FallsBackToLegacyConfigSnapshot(t *testing.T) {
 		`{"emailAddress":"alice@example.com","accountUuid":"alice-uuid"}`,
 		"unrelated", `"keep"`)
 	seqWith(t, aliceID, alice, bobID, bob) // bob has NO OAuthAccount on his account record
-	seedCred(t, home, account.ActiveCredKey, []byte(`{"x":"a"}`))
-	seedCred(t, home, account.BackupCredKey(bobID, bob), []byte(`{"x":"b"}`))
+	seedCred(t, home, account.ActiveCredKey, []byte(`{"mcpOAuth":{"linear":"tok"},"claudeAiOauth":{"accessToken":"a"}}`))
+	seedCred(t, home, account.BackupCredKey(bobID, bob), []byte(`{"claudeAiOauth":{"accessToken":"b"}}`))
 
 	// Drop a legacy snapshot in the configs dir.
 	legacyDir := filepath.Join(home, ".claude-switch-backup", "configs")
@@ -164,8 +164,8 @@ func TestSwitchTo_WithoutAnyStoredIdentityWarnsButSucceeds(t *testing.T) {
 
 	seedClaudeJSON(t, home, alice)
 	seqWith(t, aliceID, alice, bobID, bob) // bob: no OAuthAccount, no legacy snapshot
-	seedCred(t, home, account.ActiveCredKey, []byte(`{"x":"a"}`))
-	seedCred(t, home, account.BackupCredKey(bobID, bob), []byte(`{"x":"b"}`))
+	seedCred(t, home, account.ActiveCredKey, []byte(`{"mcpOAuth":{"linear":"tok"},"claudeAiOauth":{"accessToken":"a"}}`))
+	seedCred(t, home, account.BackupCredKey(bobID, bob), []byte(`{"claudeAiOauth":{"accessToken":"b"}}`))
 
 	if err := run(t, "switch-to", bobID); err != nil {
 		t.Fatalf("switch-to should not error when identity is missing: %v", err)
@@ -174,5 +174,58 @@ func TestSwitchTo_WithoutAnyStoredIdentityWarnsButSucceeds(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(home, ".claude.json"))
 	if !strings.Contains(string(data), `"emailAddress":"alice@example.com"`) {
 		t.Fatalf(".claude.json should be unchanged when no identity available: %s", data)
+	}
+}
+
+// TestSwitchTo_PreservesMCPOAuthAcrossSwitch is the regression test for the
+// bug where switch-to wrote a per-account backup verbatim into the active
+// slot. Backups hold claudeAiOauth only, so the wholesale write deleted the
+// live blob's mcpOAuth — every MCP server had to be re-authorized after
+// every switch. The token must swap; every sibling key must survive.
+func TestSwitchTo_PreservesMCPOAuthAcrossSwitch(t *testing.T) {
+	home := newTestHome(t)
+	alice, bob := "alice@example.com", "bob@example.com"
+	aliceID, bobID := account.HashEmail(alice), account.HashEmail(bob)
+
+	seedClaudeJSON(t, home, alice)
+	seq := seqWith(t, aliceID, alice, bobID, bob)
+	bobAcct := seq.Accounts[bobID]
+	bobAcct.OAuthAccount = json.RawMessage(`{"emailAddress":"bob@example.com","accountUuid":"bob-uuid"}`)
+	seq.Accounts[bobID] = bobAcct
+	if err := seq.Save(sequencePath()); err != nil {
+		t.Fatal(err)
+	}
+
+	seedCred(t, home, account.ActiveCredKey,
+		[]byte(`{"mcpOAuth":{"linear|abc":{"accessToken":"mcp-tok"}},"claudeAiOauth":{"accessToken":"alice"}}`))
+	seedCred(t, home, account.BackupCredKey(bobID, bob),
+		[]byte(`{"claudeAiOauth":{"accessToken":"bob"}}`))
+
+	if err := run(t, "switch-to", bobID); err != nil {
+		t.Fatalf("switch-to %s: %v", bobID, err)
+	}
+
+	var active map[string]json.RawMessage
+	if err := json.Unmarshal(readCred(t, home, account.ActiveCredKey), &active); err != nil {
+		t.Fatalf("parse active slot: %v", err)
+	}
+	if _, ok := active["mcpOAuth"]; !ok {
+		t.Error("mcpOAuth was wiped by the switch; MCP servers would need re-authorization")
+	}
+	if !strings.Contains(string(active["claudeAiOauth"]), `"bob"`) {
+		t.Errorf("active slot did not take bob's token: %s", active["claudeAiOauth"])
+	}
+
+	// Alice's snapshot must be claudeAiOauth-only: mcpOAuth is
+	// account-independent and must not be filed under her identity.
+	var backup map[string]json.RawMessage
+	if err := json.Unmarshal(readCred(t, home, account.BackupCredKey(aliceID, alice)), &backup); err != nil {
+		t.Fatalf("parse alice backup: %v", err)
+	}
+	if _, ok := backup["mcpOAuth"]; ok {
+		t.Error("mcpOAuth leaked into alice's per-account backup")
+	}
+	if !strings.Contains(string(backup["claudeAiOauth"]), `"alice"`) {
+		t.Errorf("alice's backup did not capture her token: %s", backup["claudeAiOauth"])
 	}
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -180,8 +181,10 @@ func TestSwitchTo(t *testing.T) {
 
 	// Distinctive blobs; bob's carries an unmodeled field to prove the swap
 	// is byte-faithful (no struct round-trip can drop it).
-	aliceActive := []byte(`{"claudeAiOauth":{"accessToken":"alice-live","refreshToken":"ra","expiresAt":111}}`)
-	bobBackup := []byte(`{"claudeAiOauth":{"accessToken":"bob","refreshToken":"rb","expiresAt":222},"futureField":"keep-me"}`)
+	aliceOAuth := `{"accessToken":"alice-live","refreshToken":"ra","expiresAt":111}`
+	bobOAuth := `{"accessToken":"bob","refreshToken":"rb","expiresAt":222,"futureField":"keep-me"}`
+	aliceActive := []byte(`{"mcpOAuth":{"srv":"tok"},"claudeAiOauth":` + aliceOAuth + `}`)
+	bobBackup := []byte(`{"claudeAiOauth":` + bobOAuth + `}`)
 	seedCred(t, home, account.ActiveCredKey, aliceActive)
 	seedCred(t, home, account.BackupCredKey(bobID, bob), bobBackup)
 
@@ -189,13 +192,29 @@ func TestSwitchTo(t *testing.T) {
 		t.Fatalf("switch-to %s: %v", bobID, err)
 	}
 
-	// The active slot now holds bob's blob, byte-for-byte.
-	if got := readCred(t, home, account.ActiveCredKey); !bytes.Equal(got, bobBackup) {
-		t.Fatalf("active slot not bob's creds:\n want %s\n  got %s", bobBackup, got)
+	// The active slot now holds bob's claudeAiOauth byte-for-byte — including
+	// futureField — while alice's account-independent mcpOAuth survives.
+	var active map[string]json.RawMessage
+	if err := json.Unmarshal(readCred(t, home, account.ActiveCredKey), &active); err != nil {
+		t.Fatalf("parse active slot: %v", err)
 	}
-	// alice's prior live creds were snapshotted into her backup slot.
-	if got := readCred(t, home, account.BackupCredKey(aliceID, alice)); !bytes.Equal(got, aliceActive) {
-		t.Fatalf("alice backup not snapshotted:\n want %s\n  got %s", aliceActive, got)
+	if got := string(active["claudeAiOauth"]); got != bobOAuth {
+		t.Fatalf("active slot not bob's tokens:\n want %s\n  got %s", bobOAuth, got)
+	}
+	if got := string(active["mcpOAuth"]); got != `{"srv":"tok"}` {
+		t.Fatalf("mcpOAuth not preserved across the switch: got %s", got)
+	}
+	// alice's prior live tokens were snapshotted into her backup slot, with
+	// the account-independent mcpOAuth stripped.
+	var backup map[string]json.RawMessage
+	if err := json.Unmarshal(readCred(t, home, account.BackupCredKey(aliceID, alice)), &backup); err != nil {
+		t.Fatalf("parse alice backup: %v", err)
+	}
+	if got := string(backup["claudeAiOauth"]); got != aliceOAuth {
+		t.Fatalf("alice backup not snapshotted:\n want %s\n  got %s", aliceOAuth, got)
+	}
+	if len(backup) != 1 {
+		t.Fatalf("alice backup should hold claudeAiOauth only, got %d keys", len(backup))
 	}
 	// sequence.json records the new active account.
 	if got := loadSeq(t).ActiveAccountID; got != bobID {

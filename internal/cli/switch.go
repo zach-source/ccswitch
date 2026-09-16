@@ -16,6 +16,7 @@ import (
 	"github.com/zach-source/ccswitch/internal/account"
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/config"
+	"github.com/zach-source/ccswitch/internal/credentials"
 )
 
 func init() {
@@ -300,6 +301,14 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	// we return without touching anything — an unlocked swap defeats the
 	// point of taking the lock at all.
 	err = withClaudeLocks(func() error {
+		// Read the live active slot once, inside the lock. It is both the
+		// prior account's snapshot source (step 2) and the carrier the
+		// target's tokens are spliced into (step 4).
+		liveActive, rerr := local.Read(ctx, account.ActiveCredKey)
+		if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "Warning: could not read prior active creds: %v\n", rerr)
+		}
+
 		// 2. Snapshot prior active into its backup slot in the store (best-effort).
 		// The prior-active account is taken from the live .claude.json, not
 		// sequence.json's recorded activeAccountId — the recorded value can be
@@ -308,13 +317,16 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 		priorID := activeID(seq)
 		if priorID != "" && priorID != targetID {
 			if cur, ok := seq.Accounts[priorID]; ok {
-				data, rerr := local.Read(ctx, account.ActiveCredKey)
-				if rerr == nil && len(data) > 0 {
-					if werr := store.Write(ctx, account.BackupCredKey(priorID, cur.Email), data); werr != nil {
+				if len(liveActive) > 0 {
+					// Strip to claudeAiOauth. mcpOAuth and any other sibling
+					// key is account-independent: filing it under this account
+					// would smear one account's MCP authorizations onto the next.
+					snapshot, oerr := credentials.OAuthOnly(liveActive)
+					if oerr != nil {
+						fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", oerr)
+					} else if werr := store.Write(ctx, account.BackupCredKey(priorID, cur.Email), snapshot); werr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
 					}
-				} else if rerr != nil && !errors.Is(rerr, backend.ErrNotFound) {
-					fmt.Fprintf(os.Stderr, "Warning: could not read prior active creds: %v\n", rerr)
 				}
 				// Also snapshot the prior identity block. The freshly-read live
 				// identity is the right thing to file under the prior account —
@@ -337,8 +349,16 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 			return fmt.Errorf("save sequence: %w", err)
 		}
 
-		// 4. Write target into active slot.
-		if err := local.Write(ctx, account.ActiveCredKey, targetData); err != nil {
+		// 4. Write target into active slot — merged, not wholesale. targetData
+		// is a per-account backup holding only claudeAiOauth; writing it
+		// verbatim would delete the live blob's mcpOAuth and force every MCP
+		// server to be re-authorized after every switch — including the
+		// switches autoswitch makes unattended.
+		activeData, aerr := credentials.SwapOAuth(liveActive, targetData)
+		if aerr != nil {
+			return fmt.Errorf("prepare active slot: %w", aerr)
+		}
+		if err := local.Write(ctx, account.ActiveCredKey, activeData); err != nil {
 			return fmt.Errorf("write active slot: %w", err)
 		}
 
