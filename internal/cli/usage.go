@@ -330,12 +330,24 @@ func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend,
 
 		raw, cred := readAccountCred(ctx, b, local, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
-			if rawFresh, fresh, err := refresh.RefreshOne(ctx, raw); err == nil {
+			key := account.BackupCredKey(id, acct.Email)
+			if id == active {
+				// The active account's credential is the live one. Rotating
+				// it without telling the live slot would strand the running
+				// session on a superseded refresh token, so this account
+				// refreshes in place, under Claude Code's locks.
+				fresh, err := refreshActiveSlot(ctx, local, b, key)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not refresh the live credential: %v\n", err)
+				} else {
+					cred = fresh
+				}
+			} else if rawFresh, fresh, err := refresh.RefreshOne(ctx, raw); err == nil {
 				// Cache the refreshed bytes back to the backend (raw, never a
 				// re-marshaled struct). Non-fatal for a read-only query, but a
 				// silent write failure would leave the stale token in place —
 				// so surface it instead of discarding the error.
-				if werr := b.Write(ctx, account.BackupCredKey(id, acct.Email), rawFresh); werr != nil {
+				if werr := b.Write(ctx, key, rawFresh); werr != nil {
 					fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s: %v\n", id, werr)
 				}
 				cred = fresh

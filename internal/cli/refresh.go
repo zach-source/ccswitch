@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,7 +8,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
-	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/config"
 	"github.com/zach-source/ccswitch/internal/refresh"
 )
@@ -62,12 +60,17 @@ func newRefreshAllCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("backend not available: %w", err)
 			}
+			local, err := resolveLocalBackend()
+			if err != nil {
+				return fmt.Errorf("local backend not available: %w", err)
+			}
 			ctx := cmd.Context()
 
-			// Mirror ccswitch.sh step 1: snapshot the active account's live
-			// credentials into its backup slot so a freshly-authenticated
-			// active account is never reported as stale.
-			syncActiveToBackup(ctx, b, seq)
+			// Reconcile the live credential first. When it is the one that
+			// expired this refreshes it in place, under Claude Code's locks,
+			// so the rotation never strands the running session — and the
+			// pass below then finds a fresh backup and skips the account.
+			syncActiveAccount(ctx, b, local, seq, cfg.Refresh.ExpiryBuffer)
 
 			n, err := refresh.RefreshAll(ctx, seq, b, cfg.Refresh.ExpiryBuffer, cliLogger(quiet))
 			// Print the summary either way, then surface any partial-failure
@@ -189,23 +192,4 @@ func newLoginCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&manual, "manual", false, "Log in without opening a local browser: print the URL and wait for a pasted response")
 	cmd.Flags().StringVar(&code, "code", "", "Supply the pasted response non-interactively (requires --manual)")
 	return cmd
-}
-
-// syncActiveToBackup copies the active credential slot into the active
-// account's backup key. Best-effort: any error is swallowed because the
-// subsequent refresh pass surfaces real problems per-account.
-func syncActiveToBackup(ctx context.Context, b backend.Backend, seq *account.Sequence) {
-	id := activeID(seq)
-	if id == "" {
-		return
-	}
-	acct, ok := seq.Accounts[id]
-	if !ok {
-		return
-	}
-	data, err := b.Read(ctx, account.ActiveCredKey)
-	if err != nil || len(data) == 0 {
-		return
-	}
-	_ = b.Write(ctx, account.BackupCredKey(id, acct.Email), data)
 }
