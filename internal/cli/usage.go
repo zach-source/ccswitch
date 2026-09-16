@@ -314,9 +314,8 @@ type oauthSlice struct {
 // "Querying #id…" status line.
 //
 // Accounts are queried sequentially by design: the per-account progress line
-// must render in order, an expired account may spawn a `claude` refresh
-// subprocess, and the managed-account count is small — so the simplicity is
-// worth more than fanning the queries out.
+// must render in order and the managed-account count is small, so the
+// simplicity is worth more than fanning the queries out.
 func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend, seq *account.Sequence, buffer time.Duration, progress bool) []accountUsage {
 	out := make([]accountUsage, 0, len(seq.Sequence))
 	active := activeID(seq)
@@ -329,9 +328,9 @@ func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend,
 			fmt.Printf("  %sQuerying #%s %s...%s ", ansiDim, id, acct.Email, ansiReset)
 		}
 
-		cred := readAccountCred(ctx, b, local, id == active, id, acct.Email)
+		raw, cred := readAccountCred(ctx, b, local, id == active, id, acct.Email)
 		if cred != nil && cred.IsExpired(buffer) {
-			if rawFresh, fresh, err := refresh.RefreshOne(ctx, cred, local); err == nil {
+			if rawFresh, fresh, err := refresh.RefreshOne(ctx, raw); err == nil {
 				// Cache the refreshed bytes back to the backend (raw, never a
 				// re-marshaled struct). Non-fatal for a read-only query, but a
 				// silent write failure would leave the stale token in place —
@@ -380,26 +379,28 @@ func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend,
 // credentials, and the only place they exist when the store is a remote
 // backend like 1Password. Returns nil only when neither source yields a
 // parseable credential.
-func readAccountCred(ctx context.Context, store, local backend.Backend, isActive bool, id, email string) *credentials.Credentials {
+// The raw bytes are returned alongside the parsed view because a refresh
+// splices into them; re-marshaling the struct would drop unmodelled fields.
+func readAccountCred(ctx context.Context, store, local backend.Backend, isActive bool, id, email string) ([]byte, *credentials.Credentials) {
 	if isActive {
-		if cred := tryReadCred(ctx, local, account.ActiveCredKey); cred != nil {
-			return cred
+		if raw, cred := tryReadCred(ctx, local, account.ActiveCredKey); cred != nil {
+			return raw, cred
 		}
 	}
 	return tryReadCred(ctx, store, account.BackupCredKey(id, email))
 }
 
 // tryReadCred reads and parses one credential, returning nil on any miss.
-func tryReadCred(ctx context.Context, b backend.Backend, key string) *credentials.Credentials {
+func tryReadCred(ctx context.Context, b backend.Backend, key string) ([]byte, *credentials.Credentials) {
 	data, err := b.Read(ctx, key)
 	if err != nil || len(data) == 0 {
-		return nil
+		return nil, nil
 	}
 	cred, err := credentials.Parse(data)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return cred
+	return data, cred
 }
 
 // fetchOAuthUsage calls the Anthropic OAuth usage endpoint with a bearer token.

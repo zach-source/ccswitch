@@ -37,7 +37,7 @@ func TestCaptureClaudeCredential_ReturnsHashedService(t *testing.T) {
 
 	// Empty active slot -> active-slot source misses, forcing the hashed branch.
 	fake := &hashedFake{Backend: inmem.New(), svc: svc, data: payload}
-	got, gotSvc := captureClaudeCredential(ctx, tmp, nil, fake, nil, time.Now())
+	got, gotSvc := captureClaudeCredential(ctx, tmp, fake, nil, time.Now())
 	if string(got) != string(payload) {
 		t.Fatalf("data mismatch: want %s got %s", payload, got)
 	}
@@ -51,7 +51,7 @@ func TestCaptureClaudeCredential_ReturnsHashedService(t *testing.T) {
 	if err := active.Write(ctx, account.ActiveCredKey, []byte(`{"claudeAiOauth":{"accessToken":"new"}}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, svc2 := captureClaudeCredential(ctx, tmp, nil, active, nil, time.Now()); svc2 != "" {
+	if _, svc2 := captureClaudeCredential(ctx, tmp, active, nil, time.Now()); svc2 != "" {
 		t.Fatalf("active-slot capture must return empty service, got %q", svc2)
 	}
 }

@@ -254,7 +254,7 @@ func ManualLoginFinish(ctx context.Context, stateDir, code string, local backend
 	}
 
 	since := time.UnixMilli(meta.SinceUnixMilli)
-	newData, hashedSvc := captureClaudeCredential(ctx, manualStateConfigDir(stateDir), nil, local, meta.BeforeActive, since)
+	newData, hashedSvc := captureClaudeCredential(ctx, manualStateConfigDir(stateDir), local, meta.BeforeActive, since)
 	if len(newData) == 0 {
 		stderrBytes, _ := os.ReadFile(manualStateStderrLog(stateDir))
 		msg := strings.TrimSpace(string(stderrBytes))
