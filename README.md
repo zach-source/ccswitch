@@ -58,6 +58,14 @@ Account Management:
   ccswitch switch-to <N|email>        Switch to a specific account
   ccswitch login [--only X] [--force] Re-authenticate expired accounts
   ccswitch refresh-all                Refresh expired OAuth tokens
+  ccswitch prune [--apply]            Clear orphaned login-capture keychain records
+
+Codex CLI:
+  ccswitch codex add <label>          Capture the current Codex login as a profile
+  ccswitch codex use <label>          Make a captured profile the live login
+  ccswitch codex list                 List captured Codex profiles
+  ccswitch codex current              Show the live Codex login
+  ccswitch codex remove <label>       Forget a profile (the live login is untouched)
 
 Usage Monitoring:
   ccswitch usage                      Show 5h block and weekly usage (active account)
@@ -86,6 +94,20 @@ credentials file on Linux/WSL). When switching, it swaps the active
 credentials and records the change. The "currently active" account is read
 from `~/.claude.json` — the live source of truth — so ccswitch stays correct
 even when you log in through `claude` directly.
+
+### Codex CLI Accounts
+Codex keeps one login at a time in `$CODEX_HOME/auth.json` (default
+`~/.codex`). `ccswitch codex` captures that file into a named profile stored
+in the same backend as your Claude accounts — Keychain, file, 1Password, or
+Vault — and restores it on demand. Switching saves the login it replaces
+first, so a token Codex rotated on its own is never rolled back.
+
+ccswitch never mints or exchanges a Codex token; Codex refreshes its own. The
+only writes are a whole-file save and restore, so an upstream schema change
+cannot corrupt a profile. Codex builds configured with
+`cli_auth_credentials_store = "keyring"` keep the login in the OS keyring
+rather than `auth.json`; ccswitch cannot address that and refuses rather than
+silently capturing nothing.
 
 ### Usage Monitoring
 `usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for
