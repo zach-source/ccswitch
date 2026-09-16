@@ -78,10 +78,21 @@ func (b *CLIBackend) itemTitle(key string) string {
 // withAccount prepends --account if one is configured. (Global op flags
 // must come before the subcommand.)
 func (b *CLIBackend) withAccount(args ...string) []string {
-	if b.account == "" {
+	// A service-account token identifies its account by itself, and op
+	// rejects --account alongside one. Dropping the shorthand lets a config
+	// written for interactive use run unchanged under a token.
+	if b.account == "" || usingServiceAccount() {
 		return args
 	}
 	return append([]string{"--account", b.account}, args...)
+}
+
+// usingServiceAccount reports whether a 1Password service-account token is in
+// the environment. Such a token authenticates every op invocation on its own
+// — no session, no biometric, no desktop app — which is the point of using
+// one for a daemon or CI runner.
+func usingServiceAccount() bool {
+	return os.Getenv("OP_SERVICE_ACCOUNT_TOKEN") != ""
 }
 
 // accountShorthand returns the OP_SESSION_<short> name op expects for the
@@ -112,6 +123,12 @@ func (b *CLIBackend) ensureSession(ctx context.Context) {
 		return
 	}
 	b.signedIn = true // either way, only try once per process
+
+	// `op signin` is an interactive-session concept and errors outright
+	// under a service-account token, which is already sufficient auth.
+	if usingServiceAccount() {
+		return
+	}
 
 	short := b.accountShorthand()
 	if short == "" {

@@ -79,8 +79,12 @@ API Configuration:
 
 Sync & Config:
   ccswitch sync [--quiet]             Bi-directional 1Password sync
+  ccswitch push [--force]             Push local credentials to the backend
+  ccswitch pull                       Pull credentials from the backend
   ccswitch daemon                     Run the sync loop continuously
   ccswitch config                     Print effective configuration
+  ccswitch setup-op-connect           Interactive 1Password Connect setup
+  ccswitch setup-op-vault             Create a dedicated vault + service-account setup
 ```
 
 Every subcommand also accepts the legacy double-dashed form
@@ -94,6 +98,30 @@ credentials file on Linux/WSL). When switching, it swaps the active
 credentials and records the change. The "currently active" account is read
 from `~/.claude.json` — the live source of truth — so ccswitch stays correct
 even when you log in through `claude` directly.
+
+### Headless 1Password Access
+`ccswitch setup-op-vault` creates a dedicated vault and prints the commands
+that grant a 1Password **service account** access to it. A service-account
+token authenticates with no biometric prompt and no desktop app, which is what
+`ccswitch daemon` under launchd/systemd, or a CI runner, needs.
+
+A dedicated vault is not optional here: 1Password refuses to grant a service
+account access to a Private or Personal vault, so the default `Private` vault
+can never be reached headlessly. The grant ccswitch prints is
+`read_items,write_items` on that one vault — enough to refresh and push, and
+nothing else.
+
+```bash
+ccswitch setup-op-vault                  # create the vault, print the setup
+ccswitch setup-op-vault --print-only     # just the instructions
+```
+
+Minting the service account is left to you: 1Password returns the token
+exactly once and creating one needs owner or admin rights, so the token never
+passes through ccswitch. Set `OP_SERVICE_ACCOUNT_TOKEN` in the environment of
+whatever runs ccswitch and the `op` backend uses it automatically — the
+configured account shorthand and the interactive `op signin` are both skipped
+when that variable is present.
 
 ### Codex CLI Accounts
 Codex keeps one login at a time in `$CODEX_HOME/auth.json` (default
