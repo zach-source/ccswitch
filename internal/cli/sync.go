@@ -75,5 +75,7 @@ func newEngine(cmd *cobra.Command, cfg *config.Config) (*syncpkg.Engine, error) 
 
 	return syncpkg.New(local, remote, seq, syncpkg.Options{
 		ExpiryBuffer: cfg.Refresh.ExpiryBuffer,
+		Reload:       func() (*account.Sequence, error) { return account.LoadSequence(sequencePath()) },
+		ActiveID:     activeID,
 	}), nil
 }

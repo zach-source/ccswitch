@@ -25,6 +25,14 @@ type Options struct {
 	ExpiryBuffer time.Duration
 	// Logger overrides the default slog.Default() logger.
 	Logger *slog.Logger
+	// Reload, when set, re-reads the sequence at the start of every Run so a
+	// long-lived engine (Daemon) sees switches and new accounts made since it
+	// started.
+	Reload func() (*account.Sequence, error)
+	// ActiveID resolves which account owns the live credential slot. It is
+	// evaluated on the local sequence before any remote metadata is merged.
+	// Defaults to seq.ActiveAccountID.
+	ActiveID func(*account.Sequence) string
 }
 
 // Result summarises one sync pass.
@@ -44,6 +52,7 @@ type Engine struct {
 	seq    *account.Sequence
 	opts   Options
 	log    *slog.Logger
+	active string // account owning account.ActiveCredKey for the current Run
 }
 
 // New constructs a sync Engine. seq must not be nil.
@@ -68,6 +77,20 @@ func (e *Engine) Sequence() *account.Sequence { return e.seq }
 // Run performs one full bi-directional sync pass.
 func (e *Engine) Run(ctx context.Context) (Result, error) {
 	var res Result
+
+	if e.opts.Reload != nil {
+		seq, err := e.opts.Reload()
+		if err != nil {
+			return res, fmt.Errorf("reload sequence: %w", err)
+		}
+		*e.seq = *seq
+	}
+	// Resolve before syncSequence: a pulled remote sequence carries another
+	// machine's activeAccountId, which says nothing about this machine's slot.
+	e.active = e.seq.ActiveAccountID
+	if e.opts.ActiveID != nil {
+		e.active = e.opts.ActiveID(e.seq)
+	}
 
 	// --- Sync sequence metadata ---
 	seqRes, err := e.syncSequence(ctx)
@@ -307,7 +330,7 @@ func (e *Engine) syncSequence(ctx context.Context) (Result, error) {
 // slot. Remote always uses the per-account backup slot.
 func (e *Engine) syncAccount(ctx context.Context, id, email string) (Result, error) {
 	var res Result
-	isActive := id == e.seq.ActiveAccountID
+	isActive := id == e.active
 	remoteKey := account.BackupCredKey(id, email)
 	localKey := remoteKey
 	if isActive {

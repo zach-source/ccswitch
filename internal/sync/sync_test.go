@@ -328,3 +328,40 @@ func TestSync_PreservesRawCredentialBytes(t *testing.T) {
 		t.Fatalf("sync altered the credential blob:\n  want %s\n   got %s", raw, got)
 	}
 }
+
+// TestSync_ReloadSeesSwitch reproduces a long-lived engine (Daemon) whose
+// sequence went stale after `ccswitch switch` A→B: without Reload it treated
+// A as active and pushed B's live token into A's remote item.
+func TestSync_ReloadSeesSwitch(t *testing.T) {
+	ctx := context.Background()
+	local := inmem.New()
+	remote := inmem.New()
+
+	seq := makeSeq("aaaa", "bbbb")
+	seq.ActiveAccountID = "aaaa"
+	switched := makeSeq("aaaa", "bbbb")
+	switched.ActiveAccountID = "bbbb"
+
+	old := time.Now().Add(time.Hour).UnixMilli()
+	writeCred(t, local, "aaaa", "aaaa@example.com", old)
+	writeCred(t, remote, "aaaa", "aaaa@example.com", old)
+	writeCred(t, local, "bbbb", "bbbb@example.com", old+60_000) // refreshed, so newer
+	live, _ := local.Read(ctx, credKey("bbbb", "bbbb@example.com"))
+	if err := local.Write(ctx, account.ActiveCredKey, live); err != nil {
+		t.Fatal(err)
+	}
+
+	e := syncp.New(local, remote, seq, syncp.Options{
+		Reload: func() (*account.Sequence, error) { return switched, nil },
+	})
+	if _, err := e.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := readCred(t, remote, "aaaa", "aaaa@example.com").ClaudeAIOAuth.AccessToken; got != "tok-aaaa" {
+		t.Errorf("remote A token = %q, want tok-aaaa", got)
+	}
+	if got := readCred(t, remote, "bbbb", "bbbb@example.com").ClaudeAIOAuth.AccessToken; got != "tok-bbbb" {
+		t.Errorf("remote B token = %q, want tok-bbbb", got)
+	}
+}

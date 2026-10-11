@@ -33,13 +33,15 @@ func NewDaemon(engine *Engine, interval time.Duration, log *slog.Logger) *Daemon
 	return &Daemon{engine: engine, interval: interval, log: log}
 }
 
-// Run blocks until ctx is cancelled, firing Engine.Run on each tick.
+// Run blocks until ctx is cancelled, firing Engine.Run immediately and then
+// on each tick.
 // It returns ctx.Err() when the context is done, or nil on clean shutdown.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.log.Info("ccswitch daemon started", "interval", d.interval)
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 
+	d.tick(ctx)
 	for {
 		select {
 		case <-ctx.Done():
