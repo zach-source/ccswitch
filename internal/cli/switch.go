@@ -296,6 +296,11 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 	// and clobbering whichever of us writes last. On a lock-timeout error
 	// we return without touching anything — an unlocked swap defeats the
 	// point of taking the lock at all.
+	// The prior account's snapshot is pushed to the store after the locks are
+	// released: a remote write (1Password: find + PUT, often an op fallback)
+	// takes seconds, and a running `claude` can't refresh while we hold them.
+	var priorKey string
+	var priorSnapshot []byte
 	err = withClaudeLocks(func() error {
 		// Read the live active slot once, inside the lock. It is both the
 		// prior account's snapshot source (step 2) and the carrier the
@@ -320,8 +325,14 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 					snapshot, oerr := credentials.OAuthOnly(liveActive)
 					if oerr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", oerr)
-					} else if werr := store.Write(ctx, account.BackupCredKey(priorID, cur.Email), snapshot); werr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
+					} else {
+						priorKey, priorSnapshot = account.BackupCredKey(priorID, cur.Email), snapshot
+						// Local copy now, while the live slot still holds it:
+						// a crash before the store write below must not lose
+						// the only current refresh token. sync pushes it later.
+						if werr := local.Write(ctx, priorKey, snapshot); werr != nil {
+							fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds locally: %v\n", werr)
+						}
 					}
 				}
 				// Also snapshot the prior identity block. The freshly-read live
@@ -398,6 +409,11 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 		}
 		return nil
 	})
+	if priorSnapshot != nil {
+		if werr := store.Write(ctx, priorKey, priorSnapshot); werr != nil {
+			fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds: %v\n", werr)
+		}
+	}
 	if err != nil {
 		return err
 	}

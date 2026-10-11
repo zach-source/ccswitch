@@ -37,6 +37,7 @@ import (
 //     pass repairs. The reverse order would strand the live session.
 func refreshActiveSlot(ctx context.Context, local, store backend.Backend, backupKey string) (*credentials.Credentials, error) {
 	var out *credentials.Credentials
+	var snapshot []byte
 	err := withClaudeLocks(func() error {
 		live, err := local.Read(ctx, account.ActiveCredKey)
 		if err != nil {
@@ -57,18 +58,24 @@ func refreshActiveSlot(ctx context.Context, local, store backend.Backend, backup
 		// The backup keeps only claudeAiOauth. mcpOAuth is minted per MCP
 		// server and belongs to no Claude account; filing it under this one
 		// would smear these MCP logins onto whichever account is restored next.
-		snapshot, err := credentials.OAuthOnly(newData)
+		snapshot, err = credentials.OAuthOnly(newData)
 		if err != nil {
 			return fmt.Errorf("snapshot refreshed credentials: %w", err)
-		}
-		if err := store.Write(ctx, backupKey, snapshot); err != nil {
-			return fmt.Errorf("write backup slot: %w", err)
 		}
 
 		out = newCred
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	// Outside the locks: the live slot is already current, so a failure here
+	// is the "backup stale" case above — and a remote store write is seconds
+	// a running `claude` would otherwise spend blocked on the lock.
+	if err := store.Write(ctx, backupKey, snapshot); err != nil {
+		return nil, fmt.Errorf("write backup slot: %w", err)
+	}
+	return out, nil
 }
 
 // syncActiveAccount reconciles the live credential with the active account's
