@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
+	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/config"
 )
 
@@ -49,8 +50,23 @@ func newAutoswitchCmd() *cobra.Command {
 
 			opts := autoswitchOpts{threshold: threshold, hysteresis: hysteresis, cooldown: cooldown, strategy: strategy}
 
+			// Resolve once, not per tick: each resolution re-dials Connect,
+			// drops its item-ID cache and re-runs `op signin` (a possible
+			// biometric prompt every interval).
+			// ponytail: the cached op session idles out after 30 min, so an
+			// --interval past that falls back to desktop-app auth; re-resolve
+			// on auth failure if that bites.
+			store, err := resolveBackend(cfg)
+			if err != nil {
+				return fmt.Errorf("resolve backend: %w", err)
+			}
+			local, err := resolveLocalBackend()
+			if err != nil {
+				return fmt.Errorf("resolve local backend: %w", err)
+			}
+
 			if once {
-				_, err := evaluateAutoswitch(cmd, cfg, opts)
+				_, err := evaluateAutoswitch(cmd, cfg, store, local, opts)
 				return err
 			}
 
@@ -60,7 +76,7 @@ func newAutoswitchCmd() *cobra.Command {
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
 			for {
-				if _, err := evaluateAutoswitch(cmd, cfg, opts); err != nil {
+				if _, err := evaluateAutoswitch(cmd, cfg, store, local, opts); err != nil {
 					fmt.Fprintf(os.Stderr, "autoswitch: %v\n", err)
 				}
 				select {
@@ -93,7 +109,7 @@ type autoswitchOpts struct {
 // decide, and — if decideAutoSwitch picked a target — perform the switch.
 // It prints exactly one decision line and returns the chosen target ID (""
 // when no switch happened).
-func evaluateAutoswitch(cmd *cobra.Command, cfg *config.Config, opts autoswitchOpts) (string, error) {
+func evaluateAutoswitch(cmd *cobra.Command, cfg *config.Config, store, local backend.Backend, opts autoswitchOpts) (string, error) {
 	seq, err := account.LoadSequence(sequencePath())
 	if err != nil {
 		return "", err
@@ -102,10 +118,7 @@ func evaluateAutoswitch(cmd *cobra.Command, cfg *config.Config, opts autoswitchO
 		return "", fmt.Errorf("no accounts are managed yet")
 	}
 
-	rows, err := usageRows(cmd, cfg, seq)
-	if err != nil {
-		return "", err
-	}
+	rows := collectUsage(cmd.Context(), store, local, seq, cfg.Refresh.ExpiryBuffer, false)
 
 	active := activeID(seq)
 	cooldownActive := withinCooldown(seq, opts.cooldown)
