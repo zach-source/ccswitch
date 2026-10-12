@@ -126,21 +126,57 @@ func newUsageCmd() *cobra.Command {
 			fmt.Printf("%sAccount:%s %s%s%s\n", ansiDim, ansiReset, ansiCyan, acctLabel, ansiReset)
 			fmt.Println()
 
-			renderBlock(cmd.Context())
+			// Each ccusage call scans all of ~/.claude/projects (GBs on a busy
+			// machine): run both at once, and don't let a wedged one hang us.
+			ctx, cancel := context.WithTimeout(cmd.Context(), ccusageTimeout)
+			defer cancel()
+			block := runCCUsage(ctx, "blocks", "--active", "--json", "--offline", "--token-limit", "max")
+			weekly := runCCUsage(ctx, "weekly", "--json", "--offline")
+
+			renderBlock(<-block)
 			fmt.Println()
-			renderWeekly(cmd.Context(), weeklyLimit)
+			renderWeekly(<-weekly, weeklyLimit)
 			return nil
 		},
 	}
 }
 
+const ccusageTimeout = 60 * time.Second
+
+// ccusageResult is one ccusage invocation's stdout or failure.
+type ccusageResult struct {
+	out []byte
+	err error
+}
+
+// runCCUsage starts `ccusage args...` in the background and delivers its
+// result on the returned channel.
+func runCCUsage(ctx context.Context, args ...string) <-chan ccusageResult {
+	ch := make(chan ccusageResult, 1)
+	go func() {
+		out, err := exec.CommandContext(ctx, "ccusage", args...).Output()
+		ch <- ccusageResult{out, err}
+	}()
+	return ch
+}
+
+// ccusageFailed reports a ccusage error on stderr so a broken install isn't
+// mistaken for "no usage".
+func ccusageFailed(err error) {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+	}
+	fmt.Fprintf(os.Stderr, "  ccusage failed: %v\n", err)
+}
+
 // renderBlock prints the active 5-hour block section.
-func renderBlock(ctx context.Context) {
+func renderBlock(r ccusageResult) {
 	fmt.Printf("%s5-Hour Block%s\n", ansiBold, ansiReset)
 
-	out, err := exec.CommandContext(ctx, "ccusage",
-		"blocks", "--active", "--json", "--offline", "--token-limit", "max").Output()
+	out, err := r.out, r.err
 	if err != nil {
+		ccusageFailed(err)
 		fmt.Println("  No active block")
 		return
 	}
@@ -171,11 +207,12 @@ func renderBlock(ctx context.Context) {
 
 // renderWeekly prints the weekly usage section, scaling against weeklyLimit
 // when one is configured.
-func renderWeekly(ctx context.Context, weeklyLimit int64) {
+func renderWeekly(r ccusageResult, weeklyLimit int64) {
 	fmt.Printf("%sWeekly Usage%s\n", ansiBold, ansiReset)
 
-	out, err := exec.CommandContext(ctx, "ccusage", "weekly", "--json", "--offline").Output()
+	out, err := r.out, r.err
 	if err != nil {
+		ccusageFailed(err)
 		fmt.Println("  This week:  No data")
 		return
 	}
