@@ -30,6 +30,18 @@ check: vet test ## Vet + Go unit tests
 .PHONY: conformance
 conformance: vet test smoke ## Full regression gate: vet + Go tests + bats smoke (run before every change)
 
+.PHONY: e2e
+e2e: ## Docker end-to-end checks (Vault + toxiproxy); E2E_OLD=<ref> also runs an older build for comparison
+	rm -rf tests/e2e/bin && mkdir -p tests/e2e/bin
+	GOOS=linux CGO_ENABLED=0 go build -o tests/e2e/bin/ccswitch-new ./cmd/ccswitch
+	@if [ -n "$(E2E_OLD)" ]; then \
+		wt=$$(mktemp -d) && git worktree add -q "$$wt" "$(E2E_OLD)" && \
+		(cd "$$wt" && GOOS=linux CGO_ENABLED=0 go build -o $(CURDIR)/tests/e2e/bin/ccswitch-old ./cmd/ccswitch); \
+		rc=$$?; git worktree remove --force "$$wt"; exit $$rc; \
+	fi
+	cd tests/e2e && docker compose up --abort-on-container-exit --exit-code-from runner --attach runner; \
+		rc=$$?; docker compose down -v >/dev/null 2>&1; exit $$rc
+
 .PHONY: install
 install: build ## Install the binary into $(PREFIX)/bin
 	install -d $(DESTDIR)$(PREFIX)/bin

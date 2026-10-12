@@ -1,0 +1,14 @@
+services:
+  vault:
+    image: hashicorp/vault:1.18
+    command: server -dev -dev-root-token-id=root -dev-listen-address=0.0.0.0:8200
+    cap_add: [IPC_LOCK]
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+  runner:
+    image: alpine:3.20
+    depends_on: [vault, toxiproxy]
+    volumes:
+      - ./bin:/bin-ccswitch:ro
+      - ./run.sh:/run.sh:ro
+    command: sh -c "apk add -q bash curl jq coreutils >/dev/null && bash /run.sh"

@@ -6,3 +6,4 @@
 # Go test/coverage output
 *.out
 *.test
+/tests/e2e/bin/
