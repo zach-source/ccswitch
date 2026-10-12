@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 
 	"github.com/zach-source/ccswitch/internal/backend"
 )
@@ -38,8 +39,8 @@ type CLIBackend struct {
 	prefix  string
 	account string
 
-	sessionEnv string // populated lazily by ensureSession; empty when signin yielded nothing
-	signedIn   bool   // true once ensureSession has run (success or no-op)
+	sessionEnv  string    // populated lazily by ensureSession; empty when signin yielded nothing
+	sessionOnce sync.Once // ensureSession runs signin at most once, even under concurrent reads
 }
 
 // NewCLI returns a CLIBackend, verifying that the op CLI is on PATH and
@@ -119,11 +120,10 @@ func (b *CLIBackend) accountShorthand() string {
 // If signin fails, the method does not surface the error; the next op
 // call will fail with the real cause if the user truly is unauthenticated.
 func (b *CLIBackend) ensureSession(ctx context.Context) {
-	if b.signedIn {
-		return
-	}
-	b.signedIn = true // either way, only try once per process
+	b.sessionOnce.Do(func() { b.signin(ctx) })
+}
 
+func (b *CLIBackend) signin(ctx context.Context) {
 	// `op signin` is an interactive-session concept and errors outright
 	// under a service-account token, which is already sufficient auth.
 	if usingServiceAccount() {

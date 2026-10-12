@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -313,73 +314,71 @@ type oauthSlice struct {
 // expired token once before giving up. progress controls the inline
 // "Querying #id…" status line.
 //
-// Accounts are queried sequentially by design: the per-account progress line
-// must render in order and the managed-account count is small, so the
-// simplicity is worth more than fanning the queries out.
+// Accounts are queried concurrently — each is a store read plus an HTTPS
+// call, so wall time is the slowest account rather than the sum. Progress
+// lines are buffered per account and printed in sequence order at the end.
 func collectUsage(ctx context.Context, b backend.Backend, local backend.Backend, seq *account.Sequence, buffer time.Duration, progress bool) []accountUsage {
-	out := make([]accountUsage, 0, len(seq.Sequence))
 	active := activeID(seq)
-
-	for _, id := range seq.Sequence {
-		acct := seq.Accounts[id]
-		row := accountUsage{ID: id, Email: acct.Email, Active: id == active, Status: "error"}
-
-		if progress {
-			fmt.Printf("  %sQuerying #%s %s...%s ", ansiDim, id, acct.Email, ansiReset)
+	rows := make([]accountUsage, len(seq.Sequence))
+	lines := make([]string, len(seq.Sequence))
+	var wg sync.WaitGroup
+	for i, id := range seq.Sequence {
+		wg.Go(func() {
+			rows[i], lines[i] = usageForAccount(ctx, b, local, id, seq.Accounts[id], id == active, buffer)
+		})
+	}
+	wg.Wait()
+	if progress {
+		for i, id := range seq.Sequence {
+			fmt.Printf("  %sQuerying #%s %s...%s %s\n", ansiDim, id, seq.Accounts[id].Email, ansiReset, lines[i])
 		}
+	}
+	return rows
+}
 
-		raw, cred := readAccountCred(ctx, b, local, id == active, id, acct.Email)
-		if cred != nil && cred.IsExpired(buffer) {
-			key := account.BackupCredKey(id, acct.Email)
-			if id == active {
-				// The active account's credential is the live one. Rotating
-				// it without telling the live slot would strand the running
-				// session on a superseded refresh token, so this account
-				// refreshes in place, under Claude Code's locks.
-				fresh, err := refreshActiveSlot(ctx, local, b, key)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not refresh the live credential: %v\n", err)
-				} else {
-					cred = fresh
-				}
-			} else if rawFresh, fresh, err := refresh.RefreshOne(ctx, raw); err == nil {
-				// Cache the refreshed bytes back to the backend (raw, never a
-				// re-marshaled struct). Non-fatal for a read-only query, but a
-				// silent write failure would leave the stale token in place —
-				// so surface it instead of discarding the error.
-				if werr := b.Write(ctx, key, rawFresh); werr != nil {
-					fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s: %v\n", id, werr)
-				}
+// usageForAccount is one account's share of collectUsage: the usage row and
+// its rendered ✓/✗ progress suffix.
+func usageForAccount(ctx context.Context, b, local backend.Backend, id string, acct account.Account, isActive bool, buffer time.Duration) (accountUsage, string) {
+	row := accountUsage{ID: id, Email: acct.Email, Active: isActive, Status: "error"}
+	raw, cred := readAccountCred(ctx, b, local, isActive, id, acct.Email)
+	if cred != nil && cred.IsExpired(buffer) {
+		key := account.BackupCredKey(id, acct.Email)
+		if isActive {
+			// The active account's credential is the live one. Rotating
+			// it without telling the live slot would strand the running
+			// session on a superseded refresh token, so this account
+			// refreshes in place, under Claude Code's locks.
+			fresh, err := refreshActiveSlot(ctx, local, b, key)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not refresh the live credential: %v\n", err)
+			} else {
 				cred = fresh
 			}
-		}
-		if cred == nil || cred.ClaudeAIOAuth.AccessToken == "" {
-			if progress {
-				fmt.Printf("%s✗ no token%s\n", ansiRed, ansiReset)
+		} else if rawFresh, fresh, err := refresh.RefreshOne(ctx, raw); err == nil {
+			// Cache the refreshed bytes back to the backend (raw, never a
+			// re-marshaled struct). Non-fatal for a read-only query, but a
+			// silent write failure would leave the stale token in place —
+			// so surface it instead of discarding the error.
+			if werr := b.Write(ctx, key, rawFresh); werr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s: %v\n", id, werr)
 			}
-			out = append(out, row)
-			continue
+			cred = fresh
 		}
-
-		usage, err := fetchOAuthUsage(ctx, cred.ClaudeAIOAuth.AccessToken)
-		if err != nil {
-			row.Status = "expired"
-			if progress {
-				fmt.Printf("%s✗ %v%s\n", ansiRed, err, ansiReset)
-			}
-			out = append(out, row)
-			continue
-		}
-
-		row.Status = "ok"
-		row.FiveHour = &oauthSlice{Utilization: usage.FiveHour.Utilization, ResetsAt: usage.FiveHour.ResetsAt}
-		row.SevenDay = &oauthSlice{Utilization: usage.SevenDay.Utilization, ResetsAt: usage.SevenDay.ResetsAt}
-		if progress {
-			fmt.Printf("%s✓%s\n", ansiGreen, ansiReset)
-		}
-		out = append(out, row)
 	}
-	return out
+	if cred == nil || cred.ClaudeAIOAuth.AccessToken == "" {
+		return row, ansiRed + "✗ no token" + ansiReset
+	}
+
+	usage, err := fetchOAuthUsage(ctx, cred.ClaudeAIOAuth.AccessToken)
+	if err != nil {
+		row.Status = "expired"
+		return row, fmt.Sprintf("%s✗ %v%s", ansiRed, err, ansiReset)
+	}
+
+	row.Status = "ok"
+	row.FiveHour = &oauthSlice{Utilization: usage.FiveHour.Utilization, ResetsAt: usage.FiveHour.ResetsAt}
+	row.SevenDay = &oauthSlice{Utilization: usage.SevenDay.Utilization, ResetsAt: usage.SevenDay.ResetsAt}
+	return row, ansiGreen + "✓" + ansiReset
 }
 
 // readAccountCred returns an account's best available credential.
