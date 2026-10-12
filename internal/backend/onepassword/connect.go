@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -70,7 +71,12 @@ func New(cfg Config) (*Backend, error) {
 	// Custom transport with tuned keep-alives — daemon issues batches of
 	// requests to the same Connect host, default MaxIdleConnsPerHost=2 would
 	// force frequent TLS re-handshakes.
+	// Short dial/TLS deadlines: Connect sits behind a VPN or CF Access, and
+	// when it's unreachable every command that resolves the store should
+	// fail in seconds, not sit out the 30s client timeout.
 	base := &http.Transport{
+		DialContext:         (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 5 * time.Second,
 		MaxIdleConns:        16,
 		MaxIdleConnsPerHost: 8,
 		IdleConnTimeout:     90 * time.Second,
@@ -89,7 +95,8 @@ func New(cfg Config) (*Backend, error) {
 		},
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	id, err := b.resolveVaultID(ctx, cfg.VaultName)
 	if err != nil {
 		return nil, fmt.Errorf("onepassword backend: resolve vault %q: %w", cfg.VaultName, err)
