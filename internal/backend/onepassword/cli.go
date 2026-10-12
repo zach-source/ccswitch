@@ -165,6 +165,28 @@ func (b *CLIBackend) opCmd(ctx context.Context, args ...string) *exec.Cmd {
 	return cmd
 }
 
+// opMutateCmd is opCmd for writes and deletes. A service-account token
+// overrides the desktop-app session, and service accounts are typically
+// read-only on the vault ("You do not have permission to perform this
+// action"), so mutations drop it and run as the signed-in user. Reads keep
+// it: they stay prompt-free.
+func (b *CLIBackend) opMutateCmd(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, b.opBin, args...)
+	cmd.Env = withoutEnv(os.Environ(), "OP_SERVICE_ACCOUNT_TOKEN")
+	return cmd
+}
+
+// withoutEnv returns env minus every entry for key.
+func withoutEnv(env []string, key string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		if k, _, _ := strings.Cut(kv, "="); k != key {
+			out = append(out, kv)
+		}
+	}
+	return out
+}
+
 // isItemNotFound recognizes op's various "this item doesn't exist" error
 // messages across CLI versions.
 func isItemNotFound(stderr string) bool {
@@ -210,7 +232,7 @@ func (b *CLIBackend) Write(ctx context.Context, key string, data []byte) error {
 }
 
 func (b *CLIBackend) docEdit(ctx context.Context, title string, data []byte) error {
-	cmd := b.opCmd(ctx, b.withAccount("document", "edit", title, "-", "--vault", b.vault)...)
+	cmd := b.opMutateCmd(ctx, b.withAccount("document", "edit", title, "-", "--vault", b.vault)...)
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -225,7 +247,7 @@ func (b *CLIBackend) docEdit(ctx context.Context, title string, data []byte) err
 }
 
 func (b *CLIBackend) docCreate(ctx context.Context, title string, data []byte) error {
-	cmd := b.opCmd(ctx, b.withAccount("document", "create", "-", "--vault", b.vault, "--title", title)...)
+	cmd := b.opMutateCmd(ctx, b.withAccount("document", "create", "-", "--vault", b.vault, "--title", title)...)
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -240,7 +262,7 @@ func (b *CLIBackend) docCreate(ctx context.Context, title string, data []byte) e
 // (idempotent).
 func (b *CLIBackend) Delete(ctx context.Context, key string) error {
 	title := b.itemTitle(key)
-	cmd := b.opCmd(ctx, b.withAccount("document", "delete", title, "--vault", b.vault)...)
+	cmd := b.opMutateCmd(ctx, b.withAccount("document", "delete", title, "--vault", b.vault)...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
