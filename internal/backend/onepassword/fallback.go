@@ -13,11 +13,10 @@ import (
 //   - Writes: a Connect token's read/write scope is fixed at creation, so a
 //     read-only token 403s on login's credential write. Write/Delete retry
 //     through the op CLI (full user permissions) on a 403.
-//   - Reads: the CLI backend stores credentials as op *documents*, whose payload
-//     Connect's Read (which only understands secure-note "credentials" fields)
-//     cannot see — it returns ErrNotFound. Read retries through the op CLI on
-//     ErrNotFound so document-stored items remain readable (e.g. usage-all for
-//     non-active accounts).
+//   - Reads: the CLI backend stores credentials as op *documents*. Connect's
+//     Read fetches a document's attached file itself, but reports ErrNotFound
+//     when it can't (missing item, file fetch refused). Read retries through
+//     the op CLI on ErrNotFound so document-stored items remain readable.
 //
 // Reads try Connect first (fast, no biometric) and only touch the CLI when
 // Connect can't satisfy them, so the op session is prompted at most once per

@@ -54,6 +54,12 @@ type opItem struct {
 	ID     string    `json:"id"`
 	Title  string    `json:"title"`
 	Fields []opField `json:"fields"`
+	Files  []opFile  `json:"files"`
+}
+
+// opFile is a file attached to a Connect item (the payload of a DOCUMENT).
+type opFile struct {
+	ID string `json:"id"`
 }
 
 // opField is a single field within a Connect API item.
@@ -176,6 +182,17 @@ func (b *Backend) Read(ctx context.Context, key string) ([]byte, error) {
 			return []byte(f.Value), nil
 		}
 	}
+	// Items the op CLI backend wrote are documents: the payload is the
+	// attached file. Reading it here saves CLIFallback an op spawn per read.
+	// Any failure reports not-found so that fallback still gets its turn.
+	if len(item.Files) > 0 {
+		var data []byte
+		path := fmt.Sprintf("/v1/vaults/%s/items/%s/files/%s/content", b.vaultID, itemID, item.Files[0].ID)
+		if err := b.apiGet(ctx, path, &data); err != nil {
+			return nil, fmt.Errorf("onepassword backend: document %q: %v: %w", key, err, backend.ErrNotFound)
+		}
+		return data, nil
+	}
 	return nil, errNotFound(key)
 }
 
@@ -291,6 +308,10 @@ func (b *Backend) apiDo(ctx context.Context, method, path string, body any, dest
 	if resp.StatusCode >= 400 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return &httpError{status: resp.StatusCode, method: method, path: path, msg: string(msg)}
+	}
+	if raw, ok := dest.(*[]byte); ok {
+		*raw, err = io.ReadAll(resp.Body)
+		return err
 	}
 	if dest != nil && resp.StatusCode != http.StatusNoContent {
 		if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {

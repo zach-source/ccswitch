@@ -27,6 +27,7 @@ type fakeItem struct {
 	ID     string
 	Title  string
 	Fields []map[string]string
+	File   []byte // non-nil → a DOCUMENT item with this attached file
 }
 
 func newFakeServer(vaultName string) *fakeServer {
@@ -82,6 +83,15 @@ func newFakeServer(vaultName string) *fakeServer {
 
 	fs.mux.HandleFunc("/v1/vaults/"+fs.vault.id+"/items/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/vaults/"+fs.vault.id+"/items/")
+		if itemID, ok := strings.CutSuffix(id, "/files/file-1/content"); ok {
+			it, found := fs.items[itemID]
+			if !found || it.File == nil {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write(it.File) //nolint:errcheck
+			return
+		}
 		switch r.Method {
 		case http.MethodGet:
 			it, ok := fs.items[id]
@@ -93,11 +103,11 @@ func newFakeServer(vaultName string) *fakeServer {
 			for _, f := range it.Fields {
 				fields = append(fields, f)
 			}
-			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-				"id":     it.ID,
-				"title":  it.Title,
-				"fields": fields,
-			})
+			resp := map[string]any{"id": it.ID, "title": it.Title, "fields": fields}
+			if it.File != nil {
+				resp["files"] = []map[string]string{{"id": "file-1"}}
+			}
+			json.NewEncoder(w).Encode(resp) //nolint:errcheck
 		case http.MethodPut:
 			if _, ok := fs.items[id]; !ok {
 				http.NotFound(w, r)
@@ -220,3 +230,21 @@ func TestBackend_Name(t *testing.T) {
 
 // Compile-time interface check.
 var _ backend.Backend = (*onepassword.Backend)(nil)
+
+// TestBackend_ReadDocument covers items the op CLI backend wrote: no
+// "credentials" field, payload in an attached file. Connect must read the
+// file itself rather than report not-found (which forces an op spawn).
+func TestBackend_ReadDocument(t *testing.T) {
+	fs := newFakeServer("ccswitch")
+	payload := []byte(`{"claudeAiOauth":{"accessToken":"AT"}}`)
+	fs.items["doc-1"] = &fakeItem{ID: "doc-1", Title: "doc-key", File: payload}
+	b := fs.newBackend(t)
+
+	got, err := b.Read(context.Background(), "doc-key")
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(got) != string(payload) {
+		t.Errorf("Read = %q, want %q", got, payload)
+	}
+}
