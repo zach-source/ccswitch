@@ -229,3 +229,26 @@ func TestSwitchTo_PreservesMCPOAuthAcrossSwitch(t *testing.T) {
 		t.Errorf("alice's backup did not capture her token: %s", backup["claudeAiOauth"])
 	}
 }
+
+// TestClaudeConfigPath_IgnoresStaleNestedFile is the regression test for
+// ccswitch reading (and switching into) a stale ~/.claude/.claude.json while
+// Claude Code, with CLAUDE_CONFIG_DIR unset, uses ~/.claude.json.
+func TestClaudeConfigPath_IgnoresStaleNestedFile(t *testing.T) {
+	home := newTestHome(t)
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", ".claude.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := claudeConfigPath(), filepath.Join(home, ".claude.json"); got != want {
+		t.Fatalf("unset CLAUDE_CONFIG_DIR: got %s, want %s", got, want)
+	}
+
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", dir)
+	if got, want := claudeConfigPath(), filepath.Join(dir, ".claude.json"); got != want {
+		t.Fatalf("CLAUDE_CONFIG_DIR set: got %s, want %s", got, want)
+	}
+}

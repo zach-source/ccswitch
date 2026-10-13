@@ -9,7 +9,7 @@ import (
 
 // settingsPath returns the path to ~/.claude/settings.json — the file the
 // API-switching commands (use-zai / use-anthropic / api-status) read and
-// write. This is distinct from claudeConfigPath() (~/.claude/.claude.json).
+// write. This is distinct from claudeConfigPath() (~/.claude.json).
 func settingsPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude", "settings.json")

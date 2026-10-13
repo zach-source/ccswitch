@@ -18,7 +18,7 @@ func newAddAccountCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "add-account",
 		Short: "Add the currently-active Claude account to the ccswitch managed set",
-		Long: "Reads ~/.claude/.claude.json + .credentials.json, derives a stable 8-char " +
+		Long: "Reads ~/.claude.json + .credentials.json, derives a stable 8-char " +
 			"ID from the email address, and writes/updates sequence.json.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.Load(config.DefaultPath())

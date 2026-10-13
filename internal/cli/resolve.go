@@ -29,7 +29,7 @@ func displayOrg(org string) string {
 	return org
 }
 
-// claudeIdentity is the subset of ~/.claude/.claude.json that ccswitch reads:
+// claudeIdentity is the subset of .claude.json that ccswitch reads:
 // the live OAuth account Claude Code is currently using.
 type claudeIdentity struct {
 	Email string
@@ -119,7 +119,7 @@ func writeClaudeOAuthBlock(block json.RawMessage) error {
 }
 
 // activeID returns the ID of the account currently logged in to Claude Code.
-// The live source of truth is ~/.claude/.claude.json, not sequence.json's
+// The live source of truth is .claude.json (claudeConfigPath), not sequence.json's
 // activeAccountId field — that recorded value goes stale whenever the user
 // logs in/out through `claude` directly without going through `ccswitch
 // switch`. The recorded field is used only as a fallback when .claude.json
@@ -321,12 +321,14 @@ func envDirPath(id string) string {
 	return filepath.Join(home, ".claude-env-"+id)
 }
 
-// claudeConfigPath returns the path to ~/.claude/.claude.json with a fallback.
+// claudeConfigPath returns the .claude.json Claude Code itself uses:
+// $CLAUDE_CONFIG_DIR/.claude.json when set, else ~/.claude.json. A stray
+// ~/.claude/.claude.json is ignored — preferring it made ccswitch read and
+// switch a file Claude Code never looks at.
 func claudeConfigPath() string {
-	home, _ := os.UserHomeDir()
-	primary := filepath.Join(home, ".claude", ".claude.json")
-	if _, err := os.Stat(primary); err == nil {
-		return primary
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return filepath.Join(dir, ".claude.json")
 	}
+	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".claude.json")
 }

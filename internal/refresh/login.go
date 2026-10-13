@@ -139,7 +139,7 @@ func LoginRotate(
 
 		// Seed a stub .claude.json so claude skips onboarding inside the
 		// isolated CLAUDE_CONFIG_DIR. The isolation still keeps the real
-		// ~/.claude/.claude.json from being touched even though
+		// ~/.claude.json from being touched even though
 		// credentials themselves go to the keychain on macOS.
 		_ = os.WriteFile(filepath.Join(tmpConfig, ".claude.json"), []byte(seedJSON), 0o600)
 
