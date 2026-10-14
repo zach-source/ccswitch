@@ -1,15 +1,18 @@
 //go:build darwin
 
-// Package keychain implements a macOS Keychain credential backend using
-// Security.framework directly via github.com/keybase/go-keychain, eliminating
-// the argv-exposure risk of the `security` CLI subprocess.
+// Package keychain implements a macOS Keychain credential backend. Item reads,
+// writes and deletes go through /usr/bin/security (stable code identity, so
+// keychain grants persist across Nix rebuilds) with secrets kept out of argv;
+// attribute-only enumeration uses Security.framework via go-keychain.
 package keychain
 
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"os/user"
 	"sort"
@@ -87,61 +90,58 @@ func readViaSecurityCLI(service, account string) ([]byte, error) {
 	return bytes.TrimSuffix(stdout.Bytes(), []byte("\n")), nil
 }
 
-// Write stores data under key. If an item already exists it is updated
-// in-place; otherwise a new item is created (idempotent).
+// Write stores data under key, updating an existing item in place.
+//
+// Writes go through /usr/bin/security for the same reason reads do: an item
+// created via Security.framework from the Nix-built ccswitch is bound to that
+// build's cdhash (its partition list omits "apple-tool:"), so every later
+// `security` read prompts for the keychain password and "Always Allow"
+// cannot stick. Items security creates trust it permanently. The secret goes
+// in hex through `security -i` on stdin, never argv.
 func (b *Backend) Write(_ context.Context, key string, data []byte) error {
 	acct, err := currentUser()
 	if err != nil {
 		return err
 	}
-
-	item := gokeychain.NewItem()
-	item.SetSecClass(gokeychain.SecClassGenericPassword)
-	item.SetService(key)
-	item.SetAccount(acct)
-	item.SetData(data)
-	item.SetAccessible(gokeychain.AccessibleWhenUnlocked)
-
-	// Attempt add; if the item already exists, fall back to update.
-	if err := gokeychain.AddItem(item); err != nil {
-		if err != gokeychain.ErrorDuplicateItem { //nolint:errorlint
-			return fmt.Errorf("keychain backend: add %q: %w", key, err)
-		}
-		// Build a query that identifies the existing item.
-		query := gokeychain.NewItem()
-		query.SetSecClass(gokeychain.SecClassGenericPassword)
-		query.SetService(key)
-		query.SetAccount(acct)
-
-		// Build the update payload (only the data changes).
-		update := gokeychain.NewItem()
-		update.SetData(data)
-
-		if err := gokeychain.UpdateItem(query, update); err != nil {
-			return fmt.Errorf("keychain backend: update %q: %w", key, err)
-		}
+	line := fmt.Sprintf("add-generic-password -U -s %q -a %q -X %s\n", key, acct, hex.EncodeToString(data))
+	if err := runSecurityInteractive(line); err != nil {
+		return fmt.Errorf("keychain backend: write %q: %w", key, err)
 	}
 	return nil
 }
 
-// Delete removes the keychain item for key. Returns nil if no item exists
-// (idempotent).
+// runSecurityInteractive feeds one command line to `security -i`. security
+// exits 0 even when the command fails, so any stderr output is the error.
+func runSecurityInteractive(line string) error {
+	cmd := exec.Command("/usr/bin/security", "-i")
+	cmd.Stdin = strings.NewReader(line)
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if msg := strings.TrimSpace(stderr.String()); msg != "" {
+		return errors.New(msg)
+	}
+	return err
+}
+
+// Delete removes the keychain item for key via /usr/bin/security. Returns nil
+// if no item exists (idempotent).
 func (b *Backend) Delete(_ context.Context, key string) error {
 	acct, err := currentUser()
 	if err != nil {
 		return err
 	}
-
-	item := gokeychain.NewItem()
-	item.SetSecClass(gokeychain.SecClassGenericPassword)
-	item.SetService(key)
-	item.SetAccount(acct)
-
-	if err := gokeychain.DeleteItem(item); err != nil {
-		if err == gokeychain.ErrorItemNotFound { //nolint:errorlint
+	cmd := exec.Command("/usr/bin/security", "delete-generic-password", "-s", key, "-a", acct)
+	var stderr bytes.Buffer
+	cmd.Stdout = io.Discard
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && ee.ExitCode() == 44 {
 			return nil
 		}
-		return fmt.Errorf("keychain backend: delete %q: %w", key, err)
+		return fmt.Errorf("keychain backend: delete %q: %w: %s", key, err, strings.TrimSpace(stderr.String()))
 	}
 	return nil
 }

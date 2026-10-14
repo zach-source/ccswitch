@@ -13,18 +13,9 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
 )
 
-// These tests exercise the real macOS Security.framework. They require the
-// test binary to be entitled to access the login keychain (true for local
-// `go test` runs; may be skipped in sandboxed CI).
-// requireRealKeychain gates every test in this file behind an opt-in.
-//
-// These tests hit the real login keychain, and they now *block* rather than
-// merely prompt: the test writes an item via Security.framework, so its ACL
-// trusts only the freshly-compiled test binary, then reads it back through
-// /usr/bin/security (see the Read path) — which that ACL does not name. macOS
-// raises a password prompt and `go test` hangs until someone answers it.
-//
-// `make check` must stay hermetic. Run these deliberately with:
+// requireRealKeychain gates every test in this file behind an opt-in: they
+// read and write the real login keychain, and `make check` must stay
+// hermetic. Run them deliberately with:
 //
 //	CCSWITCH_KEYCHAIN_TESTS=1 go test ./internal/backend/keychain/
 func requireRealKeychain(t *testing.T) {
