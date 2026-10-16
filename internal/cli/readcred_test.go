@@ -53,4 +53,14 @@ func TestReadAccountCred_StoreVsLocal(t *testing.T) {
 	} else if c.ClaudeAIOAuth.AccessToken != "backup-AT" {
 		t.Errorf("fallback token = %q, want backup-AT", c.ClaudeAIOAuth.AccessToken)
 	}
+
+	// Logged-out Claude Code: the live slot parses but holds only mcpOAuth.
+	// That must also fall back, not report "no token".
+	loggedOut := inmem.New()
+	if err := loggedOut.Write(ctx, account.ActiveCredKey, []byte(`{"mcpOAuth":{"x":{"accessToken":""}}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, c := readAccountCred(ctx, store, loggedOut, true, id, email); c == nil || c.ClaudeAIOAuth.AccessToken != "backup-AT" {
+		t.Errorf("logged-out live slot should fall back to store backup, got %+v", c)
+	}
 }

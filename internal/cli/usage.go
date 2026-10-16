@@ -337,7 +337,7 @@ type accountUsage struct {
 	ID       string      `json:"id"`
 	Email    string      `json:"email"`
 	Active   bool        `json:"active"`
-	Status   string      `json:"status"` // ok | expired | error
+	Status   string      `json:"status"` // ok | expired | unavailable | error
 	FiveHour *oauthSlice `json:"five_hour,omitempty"`
 	SevenDay *oauthSlice `json:"seven_day,omitempty"`
 }
@@ -408,7 +408,12 @@ func usageForAccount(ctx context.Context, b, local backend.Backend, id string, a
 
 	usage, err := fetchOAuthUsage(ctx, cred.ClaudeAIOAuth.AccessToken)
 	if err != nil {
-		row.Status = "expired"
+		// Only a rejected token is "expired". A 429 or a network failure says
+		// nothing about the account, and autoswitch must not act on it.
+		row.Status = "unavailable"
+		if errors.Is(err, errTokenRejected) {
+			row.Status = "expired"
+		}
 		return row, fmt.Sprintf("%s✗ %v%s", ansiRed, err, ansiReset)
 	}
 
@@ -431,7 +436,9 @@ func usageForAccount(ctx context.Context, b, local backend.Backend, id string, a
 // splices into them; re-marshaling the struct would drop unmodelled fields.
 func readAccountCred(ctx context.Context, store, local backend.Backend, isActive bool, id, email string) ([]byte, *credentials.Credentials) {
 	if isActive {
-		if raw, cred := tryReadCred(ctx, local, account.ActiveCredKey); cred != nil {
+		// A logged-out Claude Code leaves the live slot with no OAuth tokens
+		// (only mcpOAuth); fall through to the saved copy then.
+		if raw, cred := tryReadCred(ctx, local, account.ActiveCredKey); cred != nil && cred.ClaudeAIOAuth.AccessToken != "" {
 			return raw, cred
 		}
 	}
@@ -451,6 +458,10 @@ func tryReadCred(ctx context.Context, b backend.Backend, key string) ([]byte, *c
 	return data, cred
 }
 
+// errTokenRejected marks a usage query the API refused for the token itself
+// (401/403), as opposed to a rate limit or an outage.
+var errTokenRejected = errors.New("token rejected")
+
 // fetchOAuthUsage calls the Anthropic OAuth usage endpoint with a bearer token.
 func fetchOAuthUsage(ctx context.Context, token string) (*oauthUsage, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, anthropicUsageURL, nil)
@@ -466,6 +477,9 @@ func fetchOAuthUsage(ctx context.Context, token string) (*oauthUsage, error) {
 		return nil, errors.New("API error")
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("HTTP %d: %w", resp.StatusCode, errTokenRejected)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
@@ -497,6 +511,8 @@ func renderUsageAll(rows []accountUsage) {
 			fmt.Printf("    %sCould not fetch usage%s\n", ansiRed, ansiReset)
 		case "expired":
 			fmt.Printf("    %sToken expired — switch to this account to refresh%s\n", ansiYellow, ansiReset)
+		case "unavailable":
+			fmt.Printf("    %sUsage unavailable (rate limited or unreachable) — try again shortly%s\n", ansiYellow, ansiReset)
 		default:
 			h5, d7 := r.FiveHour, r.SevenDay
 			fmt.Printf("    5h:  %s%s %.0f%%%s  %sresets in %s%s\n",

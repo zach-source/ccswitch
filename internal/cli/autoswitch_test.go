@@ -151,6 +151,15 @@ func TestDecideAutoSwitch(t *testing.T) {
 			wantTarget: "b",
 		},
 		{
+			name:       "active usage unavailable (429/outage) never switches",
+			rows:       []accountUsage{bad("a", "unavailable"), ok("b", 10, 5)},
+			activeID:   "a",
+			threshold:  80,
+			hysteresis: 10,
+			strategy:   "best",
+			wantTarget: "",
+		},
+		{
 			name:       "candidate at or above threshold is never picked",
 			rows:       []accountUsage{ok("a", 95, 20), ok("b", 85, 30)},
 			activeID:   "a",
@@ -172,4 +181,21 @@ func TestDecideAutoSwitch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLockAutoswitch_SecondHolderIsRefused(t *testing.T) {
+	newTestHome(t)
+	unlock, locked, err := lockAutoswitch()
+	if err != nil || !locked {
+		t.Fatalf("first lock: locked=%v err=%v", locked, err)
+	}
+	if _, locked2, err := lockAutoswitch(); err != nil || locked2 {
+		t.Fatalf("second lock while held: locked=%v err=%v, want refused", locked2, err)
+	}
+	unlock()
+	unlock3, locked3, err := lockAutoswitch()
+	if err != nil || !locked3 {
+		t.Fatalf("lock after release: locked=%v err=%v", locked3, err)
+	}
+	unlock3()
 }

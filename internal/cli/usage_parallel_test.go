@@ -53,3 +53,29 @@ func TestCollectUsage_ParallelAndOrdered(t *testing.T) {
 		}
 	}
 }
+
+// TestUsageForAccount_StatusByHTTPCode pins that only a rejected token reads
+// as "expired"; a 429 is "unavailable", which autoswitch must not act on.
+func TestUsageForAccount_StatusByHTTPCode(t *testing.T) {
+	for code, want := range map[int]string{401: "expired", 403: "expired", 429: "unavailable", 500: "unavailable"} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(code)
+		}))
+		prev := anthropicUsageURL
+		anthropicUsageURL = srv.URL
+
+		store := inmem.New()
+		email := "a@example.com"
+		cred := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"AT","refreshToken":"RT","expiresAt":%d}}`, time.Now().Add(time.Hour).UnixMilli())
+		if err := store.Write(context.Background(), account.BackupCredKey("a", email), []byte(cred)); err != nil {
+			t.Fatal(err)
+		}
+		row, _ := usageForAccount(context.Background(), store, inmem.New(), "a", account.Account{Email: email}, false, 0)
+
+		anthropicUsageURL = prev
+		srv.Close()
+		if row.Status != want {
+			t.Errorf("HTTP %d: status %q, want %q", code, row.Status, want)
+		}
+	}
+}

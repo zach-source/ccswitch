@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -47,6 +49,22 @@ func newAutoswitchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// One autoswitch at a time. The SessionStart hook fires one per
+			// Claude session, so a herdr workspace starts several at once;
+			// each read the cooldown before the others switched and they
+			// flapped through every account in seconds. The lock is held for
+			// the whole run, so sequence.json (and the cooldown) is read
+			// after any earlier run has finished.
+			unlock, locked, err := lockAutoswitch()
+			if err != nil {
+				return err
+			}
+			if !locked {
+				fmt.Println("no action: another autoswitch is running")
+				return nil
+			}
+			defer unlock()
 
 			opts := autoswitchOpts{threshold: threshold, hysteresis: hysteresis, cooldown: cooldown, strategy: strategy}
 
@@ -94,6 +112,27 @@ func newAutoswitchCmd() *cobra.Command {
 	cmd.Flags().StringVar(&strategy, "strategy", "best", "Candidate selection strategy: best (lowest load) or next-available (first under threshold in sequence order)")
 	cmd.Flags().DurationVar(&interval, "interval", 60*time.Second, "Evaluation interval when not run with --once")
 	return cmd
+}
+
+// lockAutoswitch takes a non-blocking exclusive flock on
+// ~/.claude-switch-backup/autoswitch.lock. locked is false when another
+// process holds it. The kernel drops the lock if the process dies.
+func lockAutoswitch() (unlock func(), locked bool, err error) {
+	if err := os.MkdirAll(backupDir(), 0o700); err != nil {
+		return nil, false, err
+	}
+	f, err := os.OpenFile(filepath.Join(backupDir(), "autoswitch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("lock autoswitch: %w", err)
+	}
+	return func() { f.Close() }, true, nil
 }
 
 // autoswitchOpts bundles the tunables of one evaluation so
@@ -200,11 +239,19 @@ func decideAutoSwitch(rows []accountUsage, activeID string, threshold, hysteresi
 	activeLoad := unusableLoad
 	activeUsable := false
 	for _, r := range rows {
-		if r.ID == activeID && r.Status == "ok" {
+		if r.ID != activeID {
+			continue
+		}
+		// A rate-limited or unreachable usage query says nothing about the
+		// account; switching on it turned API 429s into account flapping.
+		if r.Status == "unavailable" {
+			return "", fmt.Sprintf("active #%s usage unavailable", activeID)
+		}
+		if r.Status == "ok" {
 			activeLoad = rowLoad(r)
 			activeUsable = true
-			break
 		}
+		break
 	}
 
 	if activeUsable && activeLoad < threshold {
