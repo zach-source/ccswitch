@@ -180,6 +180,16 @@ func newCodexUseCmd() *cobra.Command {
 				return fmt.Errorf("no Codex profile named %q — `ccswitch codex list` shows what is captured", label)
 			}
 
+			// Snapshot whatever is live first. Codex rotates its own tokens,
+			// so the live file is almost always newer than the copy captured
+			// for that profile; overwriting without saving would roll it back
+			// to a superseded token and force a re-login. The snapshot runs
+			// before the target is read so that switching to the profile
+			// that is live now restores the rotated copy.
+			if err := snapshotLiveCodex(cmd.Context(), b, reg); err != nil {
+				return err
+			}
+
 			target, err := b.Read(cmd.Context(), codex.CredKey(label))
 			if err != nil {
 				return fmt.Errorf("read Codex profile %q: %w", label, err)
@@ -187,12 +197,6 @@ func newCodexUseCmd() *cobra.Command {
 			if len(target) == 0 {
 				return fmt.Errorf("Codex profile %q holds no credential — re-capture it with `ccswitch codex add %s`", label, label)
 			}
-
-			// Snapshot whatever is live first. Codex rotates its own tokens,
-			// so the live file is almost always newer than the copy captured
-			// for that profile; overwriting without saving would roll it back
-			// to a superseded token and force a re-login.
-			snapshotLiveCodex(cmd.Context(), b, reg)
 
 			if err := codex.WriteLive(target); err != nil {
 				return err
@@ -207,31 +211,44 @@ func newCodexUseCmd() *cobra.Command {
 	}
 }
 
-// snapshotLiveCodex saves the live credential into whichever profile is
-// currently marked active, so a switch never discards a rotated token.
-// Best-effort: a failure here must not block the switch the user asked for,
-// but it is reported rather than swallowed.
-func snapshotLiveCodex(ctx context.Context, b backend.Backend, reg *codex.Registry) {
-	prior := reg.Active
-	if prior == "" {
-		return
-	}
-	if _, known := reg.Profiles[prior]; !known {
-		return
-	}
+// snapshotLiveCodex saves the live credential into the profile it belongs
+// to, found by account identity. The active marker is not trusted: a Codex
+// session that outlives a swap can write its own account back into the live
+// file, and saving that under the active profile would file one account's
+// login under another.
+//
+// A ChatGPT login that matches no profile is an error, so the caller stops
+// and the live file stays the only copy. API-key logins do not rotate and a
+// missing login has nothing to lose, so both return nil without a snapshot.
+func snapshotLiveCodex(ctx context.Context, b backend.Backend, reg *codex.Registry) error {
 	live, err := codex.ReadLive()
+	if errors.Is(err, codex.ErrNoLiveLogin) {
+		return nil
+	}
 	if err != nil {
-		return
+		return fmt.Errorf("read the live Codex login: %w", err)
 	}
-	if err := b.Write(ctx, codex.CredKey(prior), live); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: could not snapshot the live Codex login into %q: %v\n", prior, err)
-		return
+	id := codex.Describe(live)
+	if id.Mode == "apikey" {
+		return nil
 	}
-	if id := codex.Describe(live); id.Email != "" {
-		p := reg.Profiles[prior]
+	label, ok := codex.MatchProfile(reg, live)
+	if !ok {
+		who := id.Email
+		if who == "" {
+			who = "an unknown account"
+		}
+		return fmt.Errorf("the live Codex login (%s) matches no saved profile, so switching would lose it — run `ccswitch codex add <label>` first", who)
+	}
+	if err := b.Write(ctx, codex.CredKey(label), live); err != nil {
+		return fmt.Errorf("save the live Codex login into %q: %w", label, err)
+	}
+	if id.Email != "" {
+		p := reg.Profiles[label]
 		p.Mode, p.Email, p.Plan, p.AccountID = id.Mode, id.Email, id.Plan, id.AccountID
-		reg.Profiles[prior] = p
+		reg.Profiles[label] = p
 	}
+	return nil
 }
 
 func newCodexCurrentCmd() *cobra.Command {
