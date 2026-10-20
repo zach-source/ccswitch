@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
 
 // SchemaVersion is the registry format version.
@@ -31,10 +32,17 @@ type Profile struct {
 // Registry is the set of known Codex profiles and which one was last made
 // live. It holds no secrets, so it sits in a plain file rather than a
 // backend — the same split as sequence.json.
+//
+// Priority and LastSwitch are additive, so the schema version stays 1: an
+// older file loads with both empty.
 type Registry struct {
 	Version  int                `json:"version"`
 	Active   string             `json:"active,omitempty"`
 	Profiles map[string]Profile `json:"profiles"`
+	// Priority lists labels in the order autoswitch tries them.
+	Priority []string `json:"priority,omitempty"`
+	// LastSwitch is when autoswitch last switched, used for its cooldown.
+	LastSwitch time.Time `json:"lastSwitch,omitzero"`
 }
 
 // LoadRegistry reads the registry at path. A missing file is an empty
@@ -85,5 +93,25 @@ func (r *Registry) Labels() []string {
 		out = append(out, label)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Ordered returns the labels in switch order: Priority first, skipping
+// duplicates and labels with no profile, then every remaining label sorted.
+// A stale Priority entry therefore never breaks a switch.
+func (r *Registry) Ordered() []string {
+	out := make([]string, 0, len(r.Profiles))
+	seen := make(map[string]bool, len(r.Profiles))
+	for _, label := range r.Priority {
+		if _, ok := r.Profiles[label]; ok && !seen[label] {
+			seen[label] = true
+			out = append(out, label)
+		}
+	}
+	for _, label := range r.Labels() {
+		if !seen[label] {
+			out = append(out, label)
+		}
+	}
 	return out
 }
