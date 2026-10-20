@@ -168,9 +168,15 @@ func newCodexUseCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			label := args[0]
-			b, err := codexStore()
+			b, err := codexStoreFunc()
 			if err != nil {
 				return err
+			}
+			// The local backend holds the fallback copy. It stays nil when
+			// it cannot be resolved; the store is then the only copy.
+			local, localErr := resolveLocalBackend()
+			if localErr != nil {
+				local = nil
 			}
 			reg, err := codex.LoadRegistry(codexRegistryPath())
 			if err != nil {
@@ -186,11 +192,11 @@ func newCodexUseCmd() *cobra.Command {
 			// to a superseded token and force a re-login. The snapshot runs
 			// before the target is read so that switching to the profile
 			// that is live now restores the rotated copy.
-			if err := snapshotLiveCodex(cmd.Context(), b, reg); err != nil {
+			if err := snapshotLiveCodex(cmd.Context(), b, local, reg); err != nil {
 				return err
 			}
 
-			target, err := b.Read(cmd.Context(), codex.CredKey(label))
+			target, err := codexFresher(cmd.Context(), b, local, codex.CredKey(label))
 			if err != nil {
 				return fmt.Errorf("read Codex profile %q: %w", label, err)
 			}
@@ -211,6 +217,34 @@ func newCodexUseCmd() *cobra.Command {
 	}
 }
 
+// codexStoreFunc resolves the Codex store. Tests replace it.
+var codexStoreFunc = codexStore
+
+// codexFresher reads a profile from the store and from the local backend and
+// returns the copy with the later last_refresh. A snapshot that could not
+// reach the store sits in the local backend, so the store copy can be older.
+// If only one copy is readable it wins; if neither is, the store's error
+// returns. A nil local backend, or the store itself, needs only one read.
+func codexFresher(ctx context.Context, store, local backend.Backend, key string) ([]byte, error) {
+	fromStore, storeErr := store.Read(ctx, key)
+	if local == nil || local == store {
+		return fromStore, storeErr
+	}
+	fromLocal, localErr := local.Read(ctx, key)
+	switch {
+	case localErr != nil:
+		return fromStore, storeErr
+	case storeErr != nil:
+		return fromLocal, nil
+	}
+	tStore, okStore := codex.LastRefresh(fromStore)
+	tLocal, okLocal := codex.LastRefresh(fromLocal)
+	if okLocal && (!okStore || tLocal.After(tStore)) {
+		return fromLocal, nil
+	}
+	return fromStore, nil
+}
+
 // snapshotLiveCodex saves the live credential into the profile it belongs
 // to, found by account identity. The active marker is not trusted: a Codex
 // session that outlives a swap can write its own account back into the live
@@ -220,7 +254,11 @@ func newCodexUseCmd() *cobra.Command {
 // A ChatGPT login that matches no profile is an error, so the caller stops
 // and the live file stays the only copy. API-key logins do not rotate and a
 // missing login has nothing to lose, so both return nil without a snapshot.
-func snapshotLiveCodex(ctx context.Context, b backend.Backend, reg *codex.Registry) error {
+//
+// If the store write fails, the same bytes go to the local backend and the
+// switch continues with a warning. If that fails too, the live file is the
+// only copy, so the caller must not overwrite it.
+func snapshotLiveCodex(ctx context.Context, b, local backend.Backend, reg *codex.Registry) error {
 	live, err := codex.ReadLive()
 	if errors.Is(err, codex.ErrNoLiveLogin) {
 		return nil
@@ -240,8 +278,15 @@ func snapshotLiveCodex(ctx context.Context, b backend.Backend, reg *codex.Regist
 		}
 		return fmt.Errorf("the live Codex login (%s) matches no saved profile, so switching would lose it — run `ccswitch codex add <label>` first", who)
 	}
-	if err := b.Write(ctx, codex.CredKey(label), live); err != nil {
-		return fmt.Errorf("save the live Codex login into %q: %w", label, err)
+	key := codex.CredKey(label)
+	if err := b.Write(ctx, key, live); err != nil {
+		if local == nil {
+			return fmt.Errorf("save the live Codex login into %q: %w (no local backend for a fallback copy)", label, err)
+		}
+		if lerr := local.Write(ctx, key, live); lerr != nil {
+			return fmt.Errorf("save the live Codex login into %q: store: %v; local copy: %w", label, err, lerr)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: could not save the live Codex login into %q in the store (%v); kept a local copy instead.\n", label, err)
 	}
 	if id.Email != "" {
 		p := reg.Profiles[label]
