@@ -64,3 +64,39 @@ func TestReadAccountCred_StoreVsLocal(t *testing.T) {
 		t.Errorf("logged-out live slot should fall back to store backup, got %+v", c)
 	}
 }
+
+// TestReadAccountCred_PrefersFresherLocalBackup pins the stranded-token fix.
+// When a store write fails, the rotated refresh token lives only in the local
+// backup copy, and no sync daemon pushes it. Reading the store copy alone
+// replays a dead refresh token and forces a fresh login.
+func TestReadAccountCred_PrefersFresherLocalBackup(t *testing.T) {
+	ctx := context.Background()
+	store, local := inmem.New(), inmem.New()
+	id, email := account.HashEmail("alice@example.com"), "alice@example.com"
+	key := account.BackupCredKey(id, email)
+
+	stale := []byte(`{"claudeAiOauth":{"accessToken":"store-AT","refreshToken":"old","expiresAt":100}}`)
+	fresh := []byte(`{"claudeAiOauth":{"accessToken":"local-AT","refreshToken":"new","expiresAt":200}}`)
+	if err := store.Write(ctx, key, stale); err != nil {
+		t.Fatal(err)
+	}
+	if err := local.Write(ctx, key, fresh); err != nil {
+		t.Fatal(err)
+	}
+	if _, c := readAccountCred(ctx, store, local, false, id, email); c == nil || c.ClaudeAIOAuth.RefreshToken != "new" {
+		t.Fatalf("want the fresher local copy, got %+v", c)
+	}
+
+	// An older local copy must not win over the store.
+	if err := local.Write(ctx, key, []byte(`{"claudeAiOauth":{"accessToken":"x","refreshToken":"older","expiresAt":50}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, c := readAccountCred(ctx, store, local, false, id, email); c == nil || c.ClaudeAIOAuth.RefreshToken != "old" {
+		t.Fatalf("want the store copy, got %+v", c)
+	}
+
+	// An unreachable store falls back to the local copy.
+	if _, c := readAccountCred(ctx, inmem.New(), local, false, id, email); c == nil || c.ClaudeAIOAuth.RefreshToken != "older" {
+		t.Fatalf("want the local copy when the store has none, got %+v", c)
+	}
+}

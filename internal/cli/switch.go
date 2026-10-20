@@ -278,9 +278,12 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 
 	ctx := cmd.Context()
 
-	// 1. Read target's backup creds from the store; useful hint on miss.
-	targetData, err := store.Read(ctx, account.BackupCredKey(targetID, acct.Email))
-	if err != nil {
+	// 1. Read target's backup creds; useful hint on miss. A fresher local
+	// copy wins over the store's (see fresherBackup).
+	targetKey := account.BackupCredKey(targetID, acct.Email)
+	storeData, err := store.Read(ctx, targetKey)
+	targetData := fresherBackup(ctx, local, targetKey, storeData)
+	if err != nil && len(targetData) == 0 {
 		if errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("no stored credentials for %s (%s); run `ccswitch login --only %s` first",
 				targetID, acct.Email, targetID)
@@ -329,7 +332,7 @@ func performSwitch(cmd *cobra.Command, cfg *config.Config, seq *account.Sequence
 						priorKey, priorSnapshot = account.BackupCredKey(priorID, cur.Email), snapshot
 						// Local copy now, while the live slot still holds it:
 						// a crash before the store write below must not lose
-						// the only current refresh token. sync pushes it later.
+						// the only current refresh token. fresherBackup reads it back.
 						if werr := local.Write(ctx, priorKey, snapshot); werr != nil {
 							fmt.Fprintf(os.Stderr, "Warning: could not snapshot prior active creds locally: %v\n", werr)
 						}

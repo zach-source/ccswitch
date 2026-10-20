@@ -398,6 +398,11 @@ func usageForAccount(ctx context.Context, b, local backend.Backend, id string, a
 			// so surface it instead of discarding the error.
 			if werr := b.Write(ctx, key, rawFresh); werr != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s: %v\n", id, werr)
+				// The exchange may have rotated out the stored refresh token.
+				// Keep the new one locally; fresherBackup reads it back.
+				if lerr := local.Write(ctx, key, rawFresh); lerr != nil {
+					fmt.Fprintf(os.Stderr, "warning: could not cache refreshed token for %s locally: %v\n", id, lerr)
+				}
 			}
 			cred = fresh
 		}
@@ -442,7 +447,33 @@ func readAccountCred(ctx context.Context, store, local backend.Backend, isActive
 			return raw, cred
 		}
 	}
-	return tryReadCred(ctx, store, account.BackupCredKey(id, email))
+	key := account.BackupCredKey(id, email)
+	stored, _ := store.Read(ctx, key)
+	raw := fresherBackup(ctx, local, key, stored)
+	cred, err := credentials.Parse(raw)
+	if err != nil {
+		return nil, nil
+	}
+	return raw, cred
+}
+
+// fresherBackup returns the local backup copy at key when it expires later
+// than stored (the store's copy, nil if the read failed), else stored.
+//
+// A failed store write leaves the only current refresh token in the local
+// copy, and nothing pushes it up while the sync daemon is off. Reading the
+// store alone would then replay a rotated-out refresh token, and the account
+// would need a fresh login.
+func fresherBackup(ctx context.Context, local backend.Backend, key string, stored []byte) []byte {
+	lraw, lcred := tryReadCred(ctx, local, key)
+	if lcred == nil {
+		return stored
+	}
+	if scred, err := credentials.Parse(stored); err == nil &&
+		scred.ClaudeAIOAuth.ExpiresAtMillis >= lcred.ClaudeAIOAuth.ExpiresAtMillis {
+		return stored
+	}
+	return lraw
 }
 
 // tryReadCred reads and parses one credential, returning nil on any miss.
