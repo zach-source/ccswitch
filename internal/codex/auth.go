@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const (
@@ -175,8 +176,10 @@ func Describe(data []byte) Identity {
 	return id
 }
 
-// idClaims mirrors the subset of Codex's IdClaims worth displaying.
+// idClaims mirrors the subset of Codex's IdClaims worth displaying, plus the
+// exp claim that access tokens share.
 type idClaims struct {
+	Exp     int64  `json:"exp"`
 	Email   string `json:"email"`
 	Profile struct {
 		Email string `json:"email"`
@@ -207,4 +210,68 @@ func decodeJWTClaims(jwt string) idClaims {
 		return idClaims{}
 	}
 	return c
+}
+
+// MatchProfile names the saved profile that the live auth.json belongs to.
+//
+// The account ID is the key, but two users can share one ChatGPT workspace
+// and so share an account ID. When both sides carry an email, it must agree
+// (case-insensitively) to keep them apart. Anything other than exactly one
+// candidate is no match: guessing would save one user's rotated tokens over
+// another user's profile.
+func MatchProfile(reg *Registry, live []byte) (string, bool) {
+	id := Describe(live)
+	if id.AccountID == "" {
+		return "", false
+	}
+	var match string
+	var n int
+	for label, p := range reg.Profiles {
+		if p.AccountID != id.AccountID {
+			continue
+		}
+		if p.Email != "" && id.Email != "" && !strings.EqualFold(p.Email, id.Email) {
+			continue
+		}
+		match = label
+		n++
+	}
+	if n != 1 {
+		return "", false
+	}
+	return match, true
+}
+
+// AccessTokenExpiry returns when the access token expires, read from its exp
+// claim without verifying the signature (see decodeJWTClaims).
+func AccessTokenExpiry(blob []byte) (time.Time, bool) {
+	var b struct {
+		Tokens struct {
+			AccessToken string `json:"access_token"`
+		} `json:"tokens"`
+	}
+	if json.Unmarshal(blob, &b) != nil {
+		return time.Time{}, false
+	}
+	exp := decodeJWTClaims(b.Tokens.AccessToken).Exp
+	if exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(exp, 0), true
+}
+
+// LastRefresh returns when Codex last refreshed the tokens, from the
+// top-level last_refresh field.
+func LastRefresh(blob []byte) (time.Time, bool) {
+	var b struct {
+		LastRefresh string `json:"last_refresh"`
+	}
+	if json.Unmarshal(blob, &b) != nil {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, b.LastRefresh)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
