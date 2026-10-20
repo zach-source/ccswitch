@@ -34,7 +34,7 @@ func codexBlob(token, email string) string {
 // codexIDToken builds an unsigned JWT carrying the claims Describe reads.
 func codexIDToken(email string) string {
 	enc := base64.RawURLEncoding.EncodeToString
-	claims := `{"email":"` + email + `","https://api.openai.com/auth":{"chatgpt_plan_type":"pro"}}`
+	claims := `{"email":"` + email + `","https://api.openai.com/auth":{"chatgpt_plan_type":"pro","chatgpt_account_id":"acct-` + email + `"}}`
 	return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(claims)) + ".sig"
 }
 
