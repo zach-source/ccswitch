@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "ccswitch",
+  "project_id": "ef11d400-e9cf-4fc4-b82e-84e7fe0f98a9"
+}
