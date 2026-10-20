@@ -68,6 +68,23 @@ func FindByEmail(email string) (Profile, bool, error) {
 	return Profile{}, false, nil
 }
 
+// OpenURL opens url in the Chrome profile in directory profileDir. It does
+// not wait for Chrome to exit, because Chrome often keeps running. If Chrome
+// already runs, the new process gives the URL to that instance and exits.
+// A goroutine waits for the child, so a short-lived process leaves no zombie.
+func OpenURL(profileDir, url string) error {
+	chrome, err := chromeBinary()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(chrome, "--profile-directory="+profileDir, url)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("browser: start Chrome: %w", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
 // InstallOpener writes shim scripts at dir/open (plus dir/xdg-open on
 // Linux) that route URL arguments through Chrome with
 // --profile-directory=profile. Non-URL arguments are forwarded to the
@@ -134,8 +151,13 @@ func localStatePath() (string, error) {
 }
 
 // chromeBinary returns the OS-specific Chrome executable path. Returns
-// ("", error) when Chrome is not installed.
+// ("", error) when Chrome is not installed. CCSWITCH_CHROME_BINARY overrides
+// the lookup, mirroring CCSWITCH_CHROME_LOCAL_STATE, so tests can run a fake
+// Chrome script.
 func chromeBinary() (string, error) {
+	if v := os.Getenv("CCSWITCH_CHROME_BINARY"); v != "" {
+		return v, nil
+	}
 	switch runtime.GOOS {
 	case "darwin":
 		p := "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"

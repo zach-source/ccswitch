@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sampleLocalState = `{
@@ -138,5 +139,41 @@ func TestInstallNoOpener_AlwaysFails(t *testing.T) {
 	}
 	if strings.Contains(string(body), realOpen) {
 		t.Errorf("no-opener shim references the real system opener %q, it must not", realOpen)
+	}
+}
+
+func TestOpenURL_PassesProfileAndURLAsSeparateArgs(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "args")
+	fake := filepath.Join(dir, "chrome")
+	script := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> \"" + out + "\"; done\n"
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CCSWITCH_CHROME_BINARY", fake)
+
+	if err := OpenURL("Profile 3", "https://example.com/device"); err != nil {
+		t.Fatalf("OpenURL: %v", err)
+	}
+
+	// OpenURL does not wait for the child, so poll for the fake's output.
+	want := "--profile-directory=Profile 3\nhttps://example.com/device\n"
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, _ := os.ReadFile(out)
+		if string(got) == want {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake Chrome args = %q, want %q", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestOpenURL_MissingBinary(t *testing.T) {
+	t.Setenv("CCSWITCH_CHROME_BINARY", filepath.Join(t.TempDir(), "nope"))
+	if err := OpenURL("Default", "https://example.com"); err == nil {
+		t.Fatal("want error for a missing binary")
 	}
 }
