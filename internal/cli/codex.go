@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/backend"
+	"github.com/zach-source/ccswitch/internal/browser"
 	"github.com/zach-source/ccswitch/internal/codex"
 	"github.com/zach-source/ccswitch/internal/config"
 )
@@ -43,6 +46,7 @@ func newCodexCmd() *cobra.Command {
 		newCodexUseCmd(),
 		newCodexCurrentCmd(),
 		newCodexRemoveCmd(),
+		newCodexLoginCmd(),
 	)
 	return cmd
 }
@@ -159,6 +163,79 @@ func newCodexAddCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func newCodexLoginCmd() *cobra.Command {
+	var label string
+	cmd := &cobra.Command{
+		Use:   "login <email>",
+		Short: "Sign in a ChatGPT account and save it as a Codex profile",
+		Long: "Sign in a ChatGPT account in a temporary CODEX_HOME and save the login as a\n" +
+			"profile. The live login is not changed. The sign-in address opens in the\n" +
+			"Chrome profile signed in to <email>, or prints when none matches.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			email := args[0]
+			if label == "" {
+				label = email
+			}
+			b, err := codexStoreFunc()
+			if err != nil {
+				return err
+			}
+			reg, err := codex.LoadRegistry(codexRegistryPath())
+			if err != nil {
+				return err
+			}
+
+			blob, err := codex.SignIn(cmd.Context(), filepath.Join(backupDir(), "codex-login.lock"),
+				func(d codex.DeviceLogin) { announceCodexLogin(email, d) })
+			if err != nil {
+				return err
+			}
+			id := codex.Describe(blob)
+			if !strings.EqualFold(id.Email, email) {
+				who := id.Email
+				if who == "" {
+					who = "an unknown account"
+				}
+				return fmt.Errorf("signed in as %s, not %s — nothing was saved", who, email)
+			}
+			if err := b.Write(cmd.Context(), codex.CredKey(label), blob); err != nil {
+				return fmt.Errorf("save Codex credential: %w", err)
+			}
+			reg.Profiles[label] = codex.Profile{
+				Label: label, Mode: id.Mode, Email: id.Email,
+				Plan: id.Plan, AccountID: id.AccountID,
+			}
+			if !slices.Contains(reg.Priority, label) {
+				reg.Priority = append(reg.Priority, label)
+			}
+			if err := reg.Save(codexRegistryPath()); err != nil {
+				return err
+			}
+			fmt.Printf("Saved Codex profile %q: %s\n", label, describeProfile(reg.Profiles[label]))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&label, "label", "", "profile label (default: the email)")
+	return cmd
+}
+
+// announceCodexLogin tells the user how to finish the sign-in. It opens the
+// address in the Chrome profile of email when one exists.
+func announceCodexLogin(email string, d codex.DeviceLogin) {
+	if d.BrowserFallback && d.Code == "" {
+		fmt.Printf("Codex opened your default browser. Sign in as %s there.\n", email)
+		return
+	}
+	fmt.Printf("One-time code: %s\n", d.Code)
+	prof, found, err := browser.FindByEmail(email)
+	if err == nil && found && browser.OpenURL(prof.Directory, d.URL) == nil {
+		fmt.Printf("Opened %s in Chrome profile %q.\n", d.URL, prof.Name)
+		return
+	}
+	fmt.Printf("No Chrome profile is signed in as %s. Open this address and sign in:\n  %s\n", email, d.URL)
 }
 
 func newCodexUseCmd() *cobra.Command {

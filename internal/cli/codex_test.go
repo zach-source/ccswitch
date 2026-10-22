@@ -4,8 +4,10 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/zach-source/ccswitch/internal/codex"
 )
@@ -222,5 +224,134 @@ func TestCodexRegistry_IsOwnerOnly(t *testing.T) {
 func TestCodexCredKeyFormat(t *testing.T) {
 	if got := codex.CredKey("work"); got != "Codex-Account-work" {
 		t.Errorf("CredKey = %q, want Codex-Account-work", got)
+	}
+}
+
+// fakeLoginEnv puts a fake `codex` on PATH that prints the device prompt and
+// writes blob as the temporary login. It also sets up a fake Chrome whose
+// profile "Profile 1" is signed in as chromeEmail, and returns the file that
+// records the Chrome arguments. A zero exit code means success.
+func fakeLoginEnv(t *testing.T, blob string, exitCode int, chromeEmail string) (chromeArgs string) {
+	t.Helper()
+	dir := t.TempDir()
+	blobFile := filepath.Join(dir, "blob.json")
+	if err := os.WriteFile(blobFile, []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf '1. Open this link in your browser and sign in to your account\\n'\n" +
+		"printf '   https://auth.example.test/codex/device\\n'\n" +
+		"printf '2. Enter this one-time code (expires in 15 minutes)\\n'\n" +
+		"printf '   ABCD-12345\\n'\n" +
+		"cp '" + blobFile + "' \"$CODEX_HOME/auth.json\"\n" +
+		"exit " + strconv.Itoa(exitCode) + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	chromeArgs = filepath.Join(dir, "chrome-args")
+	chrome := filepath.Join(dir, "chrome")
+	if err := os.WriteFile(chrome, []byte("#!/bin/sh\necho \"$@\" > '"+chromeArgs+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CCSWITCH_CHROME_BINARY", chrome)
+	state := filepath.Join(dir, "Local State")
+	body := `{"profile":{"info_cache":{"Profile 1":{"name":"W","user_name":"` + chromeEmail + `"}}}}`
+	if err := os.WriteFile(state, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CCSWITCH_CHROME_LOCAL_STATE", state)
+	return chromeArgs
+}
+
+func waitForFile(t *testing.T, path string) string {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+			return string(data)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("file %s was not written", path)
+	return ""
+}
+
+func TestCodexLogin_MatchSavesProfileAndKeepsLiveLogin(t *testing.T) {
+	home := newTestHome(t)
+	live := codexBlob("live-rt", "live@example.com")
+	codexHome := newCodexHome(t, live)
+	chromeArgs := fakeLoginEnv(t, codexBlob("new-rt", "Work@Example.com"), 0, "work@example.com")
+
+	if err := run(t, "codex", "login", "work@example.com"); err != nil {
+		t.Fatalf("codex login: %v", err)
+	}
+
+	if !strings.Contains(string(readCred(t, home, codex.CredKey("work@example.com"))), "new-rt") {
+		t.Error("the new login was not stored under the email label")
+	}
+	reg := readCodexRegistry(t)
+	p := reg.Profiles["work@example.com"]
+	if p.Email != "Work@Example.com" || p.Plan != "pro" {
+		t.Errorf("profile = %+v", p)
+	}
+	if len(reg.Priority) != 1 || reg.Priority[0] != "work@example.com" {
+		t.Errorf("Priority = %v", reg.Priority)
+	}
+	if got := waitForFile(t, chromeArgs); !strings.Contains(got, "--profile-directory=Profile 1") ||
+		!strings.Contains(got, "https://auth.example.test/codex/device") {
+		t.Errorf("chrome args = %q", got)
+	}
+	after, _ := os.ReadFile(filepath.Join(codexHome, "auth.json"))
+	if string(after) != live {
+		t.Error("the live login changed")
+	}
+}
+
+func TestCodexLogin_LabelFlagAndNoDuplicatePriority(t *testing.T) {
+	home := newTestHome(t)
+	newCodexHome(t, "")
+	fakeLoginEnv(t, codexBlob("new-rt", "work@example.com"), 0, "nobody@example.com")
+
+	for i := 0; i < 2; i++ {
+		if err := run(t, "codex", "login", "work@example.com", "--label", "work"); err != nil {
+			t.Fatalf("codex login: %v", err)
+		}
+	}
+	if readCred(t, home, codex.CredKey("work")) == nil {
+		t.Error("credential not stored under the --label")
+	}
+	if reg := readCodexRegistry(t); len(reg.Priority) != 1 {
+		t.Errorf("Priority = %v, want one entry", reg.Priority)
+	}
+}
+
+func TestCodexLogin_MismatchSavesNothing(t *testing.T) {
+	home := newTestHome(t)
+	newCodexHome(t, "")
+	fakeLoginEnv(t, codexBlob("other-rt", "other@example.com"), 0, "work@example.com")
+
+	err := run(t, "codex", "login", "work@example.com")
+	if err == nil || !strings.Contains(err.Error(), "other@example.com") {
+		t.Fatalf("err = %v, want one naming other@example.com", err)
+	}
+	if readCred(t, home, codex.CredKey("work@example.com")) != nil {
+		t.Error("a credential was stored")
+	}
+	if reg := readCodexRegistry(t); len(reg.Profiles) != 0 || len(reg.Priority) != 0 {
+		t.Errorf("registry changed: %+v", reg)
+	}
+}
+
+func TestCodexLogin_CodexFailureSavesNothing(t *testing.T) {
+	home := newTestHome(t)
+	newCodexHome(t, "")
+	fakeLoginEnv(t, codexBlob("rt", "work@example.com"), 1, "work@example.com")
+
+	if err := run(t, "codex", "login", "work@example.com"); err == nil {
+		t.Fatal("want an error when codex fails")
+	}
+	if readCred(t, home, codex.CredKey("work@example.com")) != nil {
+		t.Error("a credential was stored")
 	}
 }
