@@ -48,6 +48,7 @@ func newCodexCmd() *cobra.Command {
 		newCodexRemoveCmd(),
 		newCodexLoginCmd(),
 		newCodexPriorityCmd(),
+		newCodexUsageCmd(),
 	)
 	return cmd
 }
