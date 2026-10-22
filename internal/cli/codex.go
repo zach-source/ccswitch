@@ -47,6 +47,7 @@ func newCodexCmd() *cobra.Command {
 		newCodexCurrentCmd(),
 		newCodexRemoveCmd(),
 		newCodexLoginCmd(),
+		newCodexPriorityCmd(),
 	)
 	return cmd
 }
@@ -236,6 +237,32 @@ func announceCodexLogin(email string, d codex.DeviceLogin) {
 		return
 	}
 	fmt.Printf("No Chrome profile is signed in as %s. Open this address and sign in:\n  %s\n", email, d.URL)
+}
+
+func newCodexPriorityCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "priority [label...]",
+		Short: "Show or set the order in which autoswitch tries Codex profiles",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			reg, err := codex.LoadRegistry(codexRegistryPath())
+			if err != nil {
+				return err
+			}
+			if len(args) == 0 {
+				for _, label := range reg.Ordered() {
+					fmt.Println(label)
+				}
+				return nil
+			}
+			for _, label := range args {
+				if _, ok := reg.Profiles[label]; !ok {
+					return fmt.Errorf("no Codex profile named %q — `ccswitch codex list` shows what is saved", label)
+				}
+			}
+			reg.Priority = args
+			return reg.Save(codexRegistryPath())
+		},
+	}
 }
 
 func newCodexUseCmd() *cobra.Command {
@@ -442,6 +469,7 @@ func newCodexRemoveCmd() *cobra.Command {
 			}
 
 			delete(reg.Profiles, label)
+			reg.Priority = slices.DeleteFunc(reg.Priority, func(l string) bool { return l == label })
 			if reg.Active == label {
 				reg.Active = ""
 			}

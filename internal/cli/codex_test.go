@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -353,5 +354,67 @@ func TestCodexLogin_CodexFailureSavesNothing(t *testing.T) {
 	}
 	if readCred(t, home, codex.CredKey("work@example.com")) != nil {
 		t.Error("a credential was stored")
+	}
+}
+
+// seedCodexProfiles writes a registry holding the given labels.
+func seedCodexProfiles(t *testing.T, priority []string, labels ...string) {
+	t.Helper()
+	reg := &codex.Registry{Version: codex.SchemaVersion, Profiles: map[string]codex.Profile{}, Priority: priority}
+	for _, l := range labels {
+		reg.Profiles[l] = codex.Profile{Label: l}
+	}
+	if err := reg.Save(codexRegistryPath()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCodexPriority_SetsOrder(t *testing.T) {
+	newTestHome(t)
+	seedCodexProfiles(t, nil, "a", "b", "c")
+
+	if err := run(t, "codex", "priority", "c", "a"); err != nil {
+		t.Fatalf("codex priority: %v", err)
+	}
+	if got := readCodexRegistry(t).Priority; !slices.Equal(got, []string{"c", "a"}) {
+		t.Errorf("Priority = %v", got)
+	}
+}
+
+func TestCodexPriority_RejectsUnknownLabel(t *testing.T) {
+	newTestHome(t)
+	seedCodexProfiles(t, []string{"a"}, "a")
+
+	err := run(t, "codex", "priority", "a", "ghost")
+	if err == nil || !strings.Contains(err.Error(), "ghost") {
+		t.Fatalf("err = %v, want one naming ghost", err)
+	}
+	if got := readCodexRegistry(t).Priority; !slices.Equal(got, []string{"a"}) {
+		t.Errorf("Priority changed to %v", got)
+	}
+}
+
+func TestCodexPriority_PrintsOrder(t *testing.T) {
+	newTestHome(t)
+	seedCodexProfiles(t, []string{"c"}, "a", "b", "c")
+
+	out, err := capture(t, func() error { return run(t, "codex", "priority") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "c\na\nb\n" {
+		t.Errorf("output = %q", out)
+	}
+}
+
+func TestCodexRemove_DropsLabelFromPriority(t *testing.T) {
+	newTestHome(t)
+	seedCodexProfiles(t, []string{"a", "b"}, "a", "b")
+
+	if err := run(t, "codex", "remove", "a"); err != nil {
+		t.Fatalf("codex remove: %v", err)
+	}
+	if got := readCodexRegistry(t).Priority; !slices.Equal(got, []string{"b"}) {
+		t.Errorf("Priority = %v", got)
 	}
 }
