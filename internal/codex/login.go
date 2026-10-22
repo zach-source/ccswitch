@@ -1,8 +1,18 @@
 package codex
 
 import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
+	"time"
 )
 
 // DeviceLogin collects what `codex login --device-auth` prints. Codex 0.160.1
@@ -95,4 +105,101 @@ func firstHTTPS(line string) string {
 		return ""
 	}
 	return "https://" + fields[0]
+}
+
+// staleSignInLock is the age after which a sign-in lock counts as left behind.
+// A device code lives 15 minutes, so no live sign-in runs longer.
+const staleSignInLock = 20 * time.Minute
+
+// SignIn runs `codex login --device-auth` in a new temporary CODEX_HOME and
+// returns the auth.json it wrote. The live login is never touched and the
+// temporary directory is always deleted. onReady runs once, when the address
+// and the code are known (or when Codex fell back to the browser login).
+//
+// lockPath is a directory lock. Codex listens on port 1455 for the browser
+// login, so two sign-ins cannot run together.
+func SignIn(ctx context.Context, lockPath string, onReady func(DeviceLogin)) ([]byte, error) {
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create lock dir: %w", err)
+	}
+	if err := takeSignInLock(lockPath); err != nil {
+		return nil, err
+	}
+	defer os.Remove(lockPath)
+
+	home, err := os.MkdirTemp("", "ccswitch-codex-")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary CODEX_HOME: %w", err)
+	}
+	defer os.RemoveAll(home)
+	if err := os.Chmod(home, 0o700); err != nil {
+		return nil, fmt.Errorf("protect temporary CODEX_HOME: %w", err)
+	}
+
+	cmd := exec.CommandContext(ctx, "codex", "login", "--device-auth")
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return nil, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start codex: %w", err)
+	}
+
+	var (
+		mu     sync.Mutex
+		login  DeviceLogin
+		called bool
+		wg     sync.WaitGroup
+	)
+	feed := func(r io.Reader) {
+		defer wg.Done()
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			mu.Lock()
+			login.Feed(sc.Text())
+			if !called && (login.Ready() || login.URL != "" && login.BrowserFallback) {
+				called = true
+				onReady(login)
+			}
+			mu.Unlock()
+		}
+	}
+	wg.Add(2)
+	go feed(stdout)
+	go feed(stderr)
+	wg.Wait()
+	// The output is never put in the error: it can hold a code or a token.
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("codex login failed: %w", err)
+	}
+
+	blob, err := os.ReadFile(filepath.Join(home, "auth.json"))
+	if err != nil {
+		return nil, fmt.Errorf("codex login wrote no auth.json: %w", err)
+	}
+	return blob, nil
+}
+
+// takeSignInLock creates the lock directory. It replaces a stale one and
+// fails when a live one exists.
+func takeSignInLock(path string) error {
+	err := os.Mkdir(path, 0o700)
+	if errors.Is(err, os.ErrExist) {
+		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > staleSignInLock {
+			_ = os.Remove(path)
+			err = os.Mkdir(path, 0o700)
+		}
+	}
+	if errors.Is(err, os.ErrExist) {
+		return errors.New("another Codex sign-in is running; wait for it to finish")
+	}
+	if err != nil {
+		return fmt.Errorf("take sign-in lock: %w", err)
+	}
+	return nil
 }

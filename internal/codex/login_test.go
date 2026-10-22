@@ -1,6 +1,9 @@
 package codex
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -130,5 +133,80 @@ func TestDeviceLogin_KeepsFirstURL(t *testing.T) {
 func TestStripANSI(t *testing.T) {
 	if got := stripANSI(ansiBlue + "x" + ansiReset + ansiGray + "y"); got != "xy" {
 		t.Errorf("stripANSI = %q", got)
+	}
+}
+
+// fakeCodex puts a `codex` script first on PATH. The script records its
+// CODEX_HOME in homeFile, prints the device prompt, then runs body.
+func fakeCodex(t *testing.T, body string) (homeFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	homeFile = filepath.Join(dir, "home")
+	script := "#!/bin/sh\n" +
+		"printf %s \"$CODEX_HOME\" > '" + homeFile + "'\n" +
+		"printf '   \\033[94mhttps://auth.example.test/codex/device\\033[0m\\n' >&2\n" +
+		"printf '1. Open this link in your browser and sign in to your account\\n'\n" +
+		"printf '   \\033[94mhttps://auth.example.test/codex/device\\033[0m\\n'\n" +
+		"printf '2. Enter this one-time code (expires in 15 minutes)\\n'\n" +
+		"printf '   \\033[94mABCD-12345\\033[0m\\n'\n" +
+		body + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "codex"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return homeFile
+}
+
+func TestSignIn_ReturnsAuthAndRemovesTempHome(t *testing.T) {
+	homeFile := fakeCodex(t, `printf '{"auth_mode":"chatgpt"}' > "$CODEX_HOME/auth.json"`)
+	lock := filepath.Join(t.TempDir(), "login.lock")
+	var got DeviceLogin
+	calls := 0
+	blob, err := SignIn(context.Background(), lock, func(d DeviceLogin) { got, calls = d, calls+1 })
+	if err != nil {
+		t.Fatalf("SignIn: %v", err)
+	}
+	if string(blob) != `{"auth_mode":"chatgpt"}` {
+		t.Errorf("blob = %q", blob)
+	}
+	if calls != 1 || got.URL != "https://auth.example.test/codex/device" || got.Code != "ABCD-12345" {
+		t.Errorf("callback calls=%d login=%+v", calls, got)
+	}
+	home, _ := os.ReadFile(homeFile)
+	if _, err := os.Stat(string(home)); !os.IsNotExist(err) {
+		t.Errorf("temp CODEX_HOME %q still exists", home)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Error("lock was not released")
+	}
+}
+
+func TestSignIn_FailureRemovesTempHome(t *testing.T) {
+	homeFile := fakeCodex(t, `printf 'secret-token' > "$CODEX_HOME/auth.json"; exit 3`)
+	_, err := SignIn(context.Background(), filepath.Join(t.TempDir(), "login.lock"), func(DeviceLogin) {})
+	if err == nil {
+		t.Fatal("want an error for a non-zero exit")
+	}
+	if strings.Contains(err.Error(), "secret-token") {
+		t.Errorf("error leaks credential text: %v", err)
+	}
+	home, _ := os.ReadFile(homeFile)
+	if _, err := os.Stat(string(home)); !os.IsNotExist(err) {
+		t.Errorf("temp CODEX_HOME %q still exists", home)
+	}
+}
+
+func TestSignIn_RefusesWhenLockHeld(t *testing.T) {
+	fakeCodex(t, "exit 0")
+	lock := filepath.Join(t.TempDir(), "login.lock")
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := SignIn(context.Background(), lock, func(DeviceLogin) {})
+	if err == nil || !strings.Contains(err.Error(), "another") {
+		t.Fatalf("err = %v, want an error about another sign-in", err)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Error("a held lock must stay in place")
 	}
 }
