@@ -118,10 +118,16 @@ func newAutoswitchCmd() *cobra.Command {
 // ~/.claude-switch-backup/autoswitch.lock. locked is false when another
 // process holds it. The kernel drops the lock if the process dies.
 func lockAutoswitch() (unlock func(), locked bool, err error) {
+	return lockFile("autoswitch.lock")
+}
+
+// lockFile takes a non-blocking exclusive flock on name in the backup
+// directory. locked is false when another process holds it.
+func lockFile(name string) (unlock func(), locked bool, err error) {
 	if err := os.MkdirAll(backupDir(), 0o700); err != nil {
 		return nil, false, err
 	}
-	f, err := os.OpenFile(filepath.Join(backupDir(), "autoswitch.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(filepath.Join(backupDir(), name), os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
@@ -130,7 +136,7 @@ func lockAutoswitch() (unlock func(), locked bool, err error) {
 		if errors.Is(err, syscall.EWOULDBLOCK) {
 			return nil, false, nil
 		}
-		return nil, false, fmt.Errorf("lock autoswitch: %w", err)
+		return nil, false, fmt.Errorf("lock %s: %w", name, err)
 	}
 	return func() { f.Close() }, true, nil
 }

@@ -49,6 +49,7 @@ func newCodexCmd() *cobra.Command {
 		newCodexLoginCmd(),
 		newCodexPriorityCmd(),
 		newCodexUsageCmd(),
+		newCodexAutoswitchCmd(),
 	)
 	return cmd
 }
@@ -291,35 +292,42 @@ func newCodexUseCmd() *cobra.Command {
 				return fmt.Errorf("no Codex profile named %q — `ccswitch codex list` shows what is captured", label)
 			}
 
-			// Snapshot whatever is live first. Codex rotates its own tokens,
-			// so the live file is almost always newer than the copy captured
-			// for that profile; overwriting without saving would roll it back
-			// to a superseded token and force a re-login. The snapshot runs
-			// before the target is read so that switching to the profile
-			// that is live now restores the rotated copy.
-			if err := snapshotLiveCodex(cmd.Context(), b, local, reg); err != nil {
-				return err
-			}
-
-			target, err := codexFresher(cmd.Context(), b, local, codex.CredKey(label))
-			if err != nil {
-				return fmt.Errorf("read Codex profile %q: %w", label, err)
-			}
-			if len(target) == 0 {
-				return fmt.Errorf("Codex profile %q holds no credential — re-capture it with `ccswitch codex add %s`", label, label)
-			}
-
-			if err := codex.WriteLive(target); err != nil {
-				return err
-			}
-			reg.Active = label
-			if err := reg.Save(codexRegistryPath()); err != nil {
+			if err := useCodexProfile(cmd.Context(), b, local, reg, label); err != nil {
 				return err
 			}
 			fmt.Printf("Codex now using %q: %s\n", label, describeProfile(reg.Profiles[label]))
 			return nil
 		},
 	}
+}
+
+// useCodexProfile makes label the live login. It snapshots the live login
+// first, writes the target's credential to the live file and saves reg with
+// label as active. `codex use` and autoswitch both call it.
+func useCodexProfile(ctx context.Context, b, local backend.Backend, reg *codex.Registry, label string) error {
+	// Snapshot whatever is live first. Codex rotates its own tokens,
+	// so the live file is almost always newer than the copy captured
+	// for that profile; overwriting without saving would roll it back
+	// to a superseded token and force a re-login. The snapshot runs
+	// before the target is read so that switching to the profile
+	// that is live now restores the rotated copy.
+	if err := snapshotLiveCodex(ctx, b, local, reg); err != nil {
+		return err
+	}
+
+	target, err := codexFresher(ctx, b, local, codex.CredKey(label))
+	if err != nil {
+		return fmt.Errorf("read Codex profile %q: %w", label, err)
+	}
+	if len(target) == 0 {
+		return fmt.Errorf("Codex profile %q holds no credential — re-capture it with `ccswitch codex add %s`", label, label)
+	}
+
+	if err := codex.WriteLive(target); err != nil {
+		return err
+	}
+	reg.Active = label
+	return reg.Save(codexRegistryPath())
 }
 
 // codexStoreFunc resolves the Codex store. Tests replace it.
