@@ -66,6 +66,10 @@ Codex CLI:
   ccswitch codex list                 List captured Codex profiles
   ccswitch codex current              Show the live Codex login
   ccswitch codex remove <label>       Forget a profile (the live login is untouched)
+  ccswitch codex login <email>        Sign in an account in its Chrome profile and save it
+  ccswitch codex priority [label...]  Show or set the autoswitch order
+  ccswitch codex usage [--json]       Show rate-limit usage for each profile
+  ccswitch codex autoswitch --once    Switch the live login when it is near its limit
 
 Usage Monitoring:
   ccswitch usage                      Show 5h block and weekly usage (active account)
@@ -136,6 +140,30 @@ cannot corrupt a profile. Codex builds configured with
 `cli_auth_credentials_store = "keyring"` keep the login in the OS keyring
 rather than `auth.json`; ccswitch cannot address that and refuses rather than
 silently capturing nothing.
+
+`ccswitch codex use` saves the live login into the profile with the same
+account ID and email, not into the profile it made active last. A Codex session
+that started before a switch can write its own tokens back into `auth.json`, so
+this stops one account's login from being saved under another account. If the
+live login matches no profile, `codex use` stops and changes nothing. If the
+store write fails, ccswitch keeps a local copy. Reads use the copy with the
+later `last_refresh`.
+
+`ccswitch codex login <email>` runs `codex login --device-auth` in a temporary
+`CODEX_HOME`, so the live login does not change. It prints the one-time code
+and opens the sign-in page in the Chrome profile that is signed in to
+`<email>`. If no Chrome profile matches, it prints the address. It saves the
+login only when the signed-in email is `<email>`, and adds the profile to the
+end of the priority order.
+
+`ccswitch codex usage` reads `https://chatgpt.com/backend-api/wham/usage` for
+each profile at the same time. A profile whose access token has expired shows
+`stale` and sends no request, because ccswitch does not refresh Codex tokens.
+
+`ccswitch codex autoswitch --once [--threshold 80] [--cooldown 5m]` moves the
+live login to the first profile in priority order that is under the threshold.
+Codex reads its login at session start, so a switch applies to the next
+session. Run it from a Codex `SessionStart` hook.
 
 ### Usage Monitoring
 `usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for
