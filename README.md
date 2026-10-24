@@ -77,6 +77,9 @@ Long-lived tokens:
   ccswitch token get <email|N>        Print the token, for CLAUDE_CODE_OAUTH_TOKEN
   ccswitch token list                 List saved tokens with their age (no token text)
   ccswitch token remove <email|N>     Delete a saved token
+  ccswitch token create --codex <email>               Sign in and save a Codex token session
+  ccswitch token get --codex <email> [--codex-home D]  Print a Codex auth.json (no refresh token), or write D/auth.json
+  ccswitch token remove --codex <email>               Revoke and delete a Codex token session
 
 Usage Monitoring:
   ccswitch usage                      Show 5h block and weekly usage (active account)
@@ -176,7 +179,7 @@ applies between profiles with the same plan.
 Codex reads its login at session start, so a switch applies to the next
 session. Run it from a Codex `SessionStart` hook.
 
-### Long-lived Claude tokens
+### Tokens for scripts and CI
 Scripts and CI cannot use a browser login. `ccswitch token create <email|N>`
 runs `claude setup-token` for that account. The sign-in opens in the Chrome
 profile of the account, as `ccswitch login` does. Claude prints a token that
@@ -193,6 +196,28 @@ claude -p "summarize this repo"
 `token get` is the only command that prints a token. `token list` shows the
 created date and age. `token remove` deletes the saved copy. It does not revoke
 the token.
+
+#### Codex sessions for scripts and CI
+`CODEX_ACCESS_TOKEN` accepts only a Business or Enterprise access token, so it
+does not help on other plans. Add `--codex` to give any plan an `auth.json`:
+
+```
+ccswitch token create --codex work@example.com
+ccswitch token get --codex work@example.com --codex-home "$CODEX_HOME"
+```
+
+`token create --codex` runs a device sign-in in a temporary `CODEX_HOME`. It
+saves the result as `Codex-Token-<email>` and does not touch your live Codex
+login or your Codex profiles. This session is separate, and only ccswitch
+holds its refresh token. `token get --codex` and `refresh-all` renew it when
+the access token has less than 24 hours left. They renew only these dedicated
+sessions, never your Codex profiles.
+
+The file that `token get --codex` prints has `refresh_token` set to `""`. CI
+cannot rotate the session, so it cannot break it. The access token lasts 10
+days, so a copy is good for at least 24 hours. `token list` shows Codex rows
+for the emails of your Codex profiles. `token remove --codex` revokes the
+session and deletes the saved copies.
 
 ### Usage Monitoring
 `usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for
