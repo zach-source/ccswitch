@@ -1,6 +1,12 @@
 package cli
 
-import "testing"
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
 
 const testToken = "sk-ant-oat01-AbCdEf0123456789_-AbCdEf0123456789_-AbCdEf0123456789_-AbCdEf0123456789_-AbCdEf0123456789_-AAAA"
 
@@ -42,5 +48,48 @@ func TestParseSetupToken(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// fakeClaude puts a `claude` script on PATH that prints TUI-like output with
+// a wrapped token when run as `claude setup-token`.
+func fakeClaude(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	body := "#!/bin/sh\n" +
+		"[ \"$1\" = setup-token ] || exit 2\n" +
+		"printf '\\033[2K\\033[1AOpening browser...\\r\\n\\033[32m✓\\033[39m Long-lived token created\\r\\n\\r\\n'\n" +
+		"printf '%s\\r\\n%s\\r\\n\\r\\nStore this token securely.\\r\\n' '" + testToken[:60] + "' '" + testToken[60:] + "'\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestRunSetupToken_ReadsTokenFromPty(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("no script(1) on this machine")
+	}
+	fakeClaude(t)
+	got, err := runSetupToken(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != testToken {
+		t.Errorf("got %q, want %q", got, testToken)
+	}
+}
+
+func TestRunSetupToken_NoTokenIsAnError(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("no script(1) on this machine")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte("#!/bin/sh\necho cancelled\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if _, err := runSetupToken(context.Background(), ""); err == nil {
+		t.Fatal("want an error when claude prints no token")
 	}
 }
