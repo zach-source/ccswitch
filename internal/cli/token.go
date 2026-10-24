@@ -78,9 +78,19 @@ func runSetupToken(ctx context.Context, shimDir string) (string, error) {
 	}
 	defer os.RemoveAll(tmp)
 	typescript := filepath.Join(tmp, "typescript")
+	// A private CLAUDE_CONFIG_DIR keeps setup-token away from the live login,
+	// the same as `ccswitch login`. The seed skips onboarding.
+	configDir := filepath.Join(tmp, "config")
+	if err := os.Mkdir(configDir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(configDir, ".claude.json"), []byte(`{"hasCompletedOnboarding":true}`), 0o600); err != nil {
+		return "", err
+	}
 
 	cmd := exec.CommandContext(ctx, scriptPath, scriptArgs(runtime.GOOS, typescript)...)
-	cmd.Env = os.Environ()
+	cmd.Dir = tmp
+	cmd.Env = append(setupTokenEnv(), "CLAUDE_CONFIG_DIR="+configDir)
 	if shimDir != "" {
 		cmd.Env = append(cmd.Env, "PATH="+shimDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	}
@@ -95,6 +105,20 @@ func runSetupToken(ctx context.Context, shimDir string) (string, error) {
 		return "", fmt.Errorf("claude setup-token failed: %w", runErr)
 	}
 	return "", errors.New("claude setup-token printed no token")
+}
+
+// setupTokenEnv is the environment without the variables that select a
+// Claude login, so setup-token signs in from the browser.
+func setupTokenEnv() []string {
+	var out []string
+	for _, kv := range os.Environ() {
+		switch key, _, _ := strings.Cut(kv, "="); key {
+		case "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES", "ANTHROPIC_API_KEY":
+		default:
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // setupTokenRunner runs the sign-in and returns the token. Tests replace it.

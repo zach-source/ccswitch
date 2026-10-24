@@ -83,6 +83,30 @@ func TestRunSetupToken_ReadsTokenFromPty(t *testing.T) {
 	}
 }
 
+// setup-token must run in a private config dir without the variables that
+// select a login, so it cannot change the live Claude login.
+func TestRunSetupToken_IsolatesClaudeLogin(t *testing.T) {
+	if _, err := exec.LookPath("script"); err != nil {
+		t.Skip("no script(1) on this machine")
+	}
+	dir := t.TempDir()
+	body := "#!/bin/sh\n" +
+		`case "$CLAUDE_CONFIG_DIR" in ""|/real) exit 1;; esac` + "\n" +
+		`[ -f "$CLAUDE_CONFIG_DIR/.claude.json" ] || exit 1` + "\n" +
+		`[ -z "$CLAUDE_CODE_OAUTH_TOKEN$ANTHROPIC_API_KEY" ] || exit 1` + "\n" +
+		"echo " + testToken + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "claude"), []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CLAUDE_CONFIG_DIR", "/real")
+	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "old")
+	t.Setenv("ANTHROPIC_API_KEY", "key")
+	if got, err := runSetupToken(context.Background(), ""); err != nil || got != testToken {
+		t.Fatalf("got %q, %v; want the token from an isolated run", got, err)
+	}
+}
+
 func TestRunSetupToken_NoTokenIsAnError(t *testing.T) {
 	if _, err := exec.LookPath("script"); err != nil {
 		t.Skip("no script(1) on this machine")
