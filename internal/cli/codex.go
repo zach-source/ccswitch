@@ -194,30 +194,7 @@ func newCodexLoginCmd() *cobra.Command {
 				return err
 			}
 
-			blob, err := codex.SignIn(cmd.Context(), filepath.Join(backupDir(), "codex-login.lock"),
-				func(d codex.DeviceLogin) { announceCodexLogin(email, d) })
-			if err != nil {
-				return err
-			}
-			id := codex.Describe(blob)
-			if !strings.EqualFold(id.Email, email) {
-				who := id.Email
-				if who == "" {
-					who = "an unknown account"
-				}
-				return fmt.Errorf("signed in as %s, not %s — nothing was saved", who, email)
-			}
-			if err := b.Write(cmd.Context(), codex.CredKey(label), blob); err != nil {
-				return fmt.Errorf("save Codex credential: %w", err)
-			}
-			reg.Profiles[label] = codex.Profile{
-				Label: label, Mode: id.Mode, Email: id.Email,
-				Plan: id.Plan, AccountID: id.AccountID,
-			}
-			if !slices.Contains(reg.Priority, label) {
-				reg.Priority = append(reg.Priority, label)
-			}
-			if err := reg.Save(codexRegistryPath()); err != nil {
+			if _, err := codexSignInAndSave(cmd.Context(), b, reg, email, label); err != nil {
 				return err
 			}
 			fmt.Printf("Saved Codex profile %q: %s\n", label, describeProfile(reg.Profiles[label]))
@@ -226,6 +203,39 @@ func newCodexLoginCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&label, "label", "", "profile label (default: the email)")
 	return cmd
+}
+
+// codexSignInAndSave signs in a ChatGPT account in a temporary CODEX_HOME and
+// saves the login as profile label. It checks that the login belongs to email
+// and saves nothing when it does not. It saves reg and returns the new login.
+func codexSignInAndSave(ctx context.Context, b backend.Backend, reg *codex.Registry, email, label string) ([]byte, error) {
+	blob, err := codex.SignIn(ctx, filepath.Join(backupDir(), "codex-login.lock"),
+		func(d codex.DeviceLogin) { announceCodexLogin(email, d) })
+	if err != nil {
+		return nil, err
+	}
+	id := codex.Describe(blob)
+	if !strings.EqualFold(id.Email, email) {
+		who := id.Email
+		if who == "" {
+			who = "an unknown account"
+		}
+		return nil, fmt.Errorf("signed in as %s, not %s — nothing was saved", who, email)
+	}
+	if err := b.Write(ctx, codex.CredKey(label), blob); err != nil {
+		return nil, fmt.Errorf("save Codex credential: %w", err)
+	}
+	reg.Profiles[label] = codex.Profile{
+		Label: label, Mode: id.Mode, Email: id.Email,
+		Plan: id.Plan, AccountID: id.AccountID,
+	}
+	if !slices.Contains(reg.Priority, label) {
+		reg.Priority = append(reg.Priority, label)
+	}
+	if err := reg.Save(codexRegistryPath()); err != nil {
+		return nil, err
+	}
+	return blob, nil
 }
 
 func newCodexAddKeyCmd() *cobra.Command {
