@@ -174,6 +174,13 @@ type codexUsageRowJSON struct {
 }
 
 func writeCodexUsageJSON(w io.Writer, rows []codexUsageRow) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(codexUsageJSON(rows))
+}
+
+// codexUsageJSON converts rows to their JSON form.
+func codexUsageJSON(rows []codexUsageRow) []codexUsageRowJSON {
 	out := make([]codexUsageRowJSON, len(rows))
 	for i, r := range rows {
 		o := codexUsageRowJSON{Label: r.Label, Email: r.Email, Live: r.Live, Status: r.Status, Plan: r.Plan,
@@ -183,9 +190,7 @@ func writeCodexUsageJSON(w io.Writer, rows []codexUsageRow) error {
 		}
 		out[i] = o
 	}
-	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return out
 }
 
 // writeCodexUsageText prints the rows in the style of `usage-all`.
@@ -244,4 +249,16 @@ func codexUsageNote(r codexUsageRow) string {
 		return "api key (no usage)"
 	}
 	return "unavailable"
+}
+
+// writeCodexSection prints the Codex part of `usage-all`. A Codex error
+// prints one dim warning line; it never fails the command.
+func writeCodexSection(w io.Writer, rows []codexUsageRow, err error, now time.Time) {
+	if err != nil {
+		fmt.Fprintf(w, "%sCodex Accounts - Usage%s\n\n    %sCodex usage unavailable: %v%s\n\n", ansiBold, ansiReset, ansiDim, err, ansiReset)
+		return
+	}
+	if len(rows) > 0 {
+		_ = writeCodexUsageText(w, rows, now)
+	}
 }

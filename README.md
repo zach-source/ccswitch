@@ -80,7 +80,7 @@ Long-lived tokens:
 
 Usage Monitoring:
   ccswitch usage                      Show 5h block and weekly usage (active account)
-  ccswitch usage-all [--json]         Show real usage for ALL accounts via API
+  ccswitch usage-all [--json]         Show real usage for ALL accounts (and Codex profiles) via API
   ccswitch set-limit <tokens>         Set weekly token limit (e.g. 6700M)
 
 API Configuration:
@@ -168,6 +168,9 @@ end of the priority order.
 `ccswitch codex usage` reads `https://chatgpt.com/backend-api/wham/usage` for
 each profile at the same time. A profile whose access token has expired shows
 `stale` and sends no request, because ccswitch does not refresh Codex tokens.
+The text output has the same bars as `usage-all`: one line for each window
+(`5h`, `7d`) with a color-coded percentage and the time until reset. `◉` marks
+the live profile. `--json` output is not changed.
 
 `ccswitch codex autoswitch --once [--threshold 80] [--cooldown 5m]` moves the
 live login to the first profile in priority order that is under the threshold.
@@ -197,7 +200,11 @@ the token.
 ### Usage Monitoring
 `usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for
 each account using stored tokens — no switching required. It returns real
-server-side 5h and 7d utilization percentages.
+server-side 5h and 7d utilization percentages. When Codex profiles exist,
+`usage-all` also prints a "Codex Accounts" section after the Claude accounts.
+A Codex error prints one warning line and does not change the exit code.
+`usage-all --json` adds a `codex` field with the same rows as
+`codex usage --json`.
 
 `usage` shows detailed stats for the active account, including the 5h block
 breakdown, via `ccusage`.

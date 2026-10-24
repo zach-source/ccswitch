@@ -320,11 +320,18 @@ func newUsageAllCmd() *cobra.Command {
 
 			results := collectUsage(cmd.Context(), b, local, seq, cfg.Refresh.ExpiryBuffer, !jsonOut)
 
+			now := time.Now()
+			codexRows, codexErr := loadCodexUsage(cmd.Context(), now)
 			if jsonOut {
-				return json.NewEncoder(os.Stdout).Encode(map[string]any{"accounts": results})
+				out := map[string]any{"accounts": results}
+				if codexErr == nil && len(codexRows) > 0 {
+					out["codex"] = codexUsageJSON(codexRows)
+				}
+				return json.NewEncoder(os.Stdout).Encode(out)
 			}
 			fmt.Println()
 			renderUsageAll(results)
+			writeCodexSection(os.Stdout, codexRows, codexErr, now)
 			return nil
 		},
 	}
