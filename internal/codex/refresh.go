@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/zach-source/ccswitch/internal/refresh"
 )
 
 const (
@@ -65,11 +67,18 @@ func (s *session) bytes() ([]byte, error) {
 	return json.MarshalIndent(s.top, "", "  ")
 }
 
+// endpoint returns the URL in env when it is set and safe, else def. An
+// override that would send a token in the clear is ignored with a warning.
 func endpoint(env, def string) string {
-	if v := os.Getenv(env); v != "" {
-		return v
+	v := os.Getenv(env)
+	if v == "" {
+		return def
 	}
-	return def
+	if err := refresh.CheckTransport(v); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring %s: %v\n", env, err)
+		return def
+	}
+	return v
 }
 
 // post sends a JSON body. It returns the status and the body (at most 1 MiB).

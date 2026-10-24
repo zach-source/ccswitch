@@ -193,3 +193,21 @@ func TestWithoutRefreshToken(t *testing.T) {
 		t.Error("last_refresh lost")
 	}
 }
+
+func TestRefresh_IgnoresUnsafeOverride(t *testing.T) {
+	hit := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	defer srv.Close()
+	// A non-loopback http URL must not be used. 192.0.2.1 is a test address.
+	t.Setenv("CCSWITCH_CODEX_REFRESH_URL", "http://192.0.2.1/oauth/token")
+	if got := endpoint("CCSWITCH_CODEX_REFRESH_URL", "https://default.test/x"); got != "https://default.test/x" {
+		t.Errorf("endpoint = %q, want the default", got)
+	}
+	t.Setenv("CCSWITCH_CODEX_REFRESH_URL", srv.URL)
+	if got := endpoint("CCSWITCH_CODEX_REFRESH_URL", "https://default.test/x"); got != srv.URL {
+		t.Errorf("loopback override = %q, want %q", got, srv.URL)
+	}
+	if hit {
+		t.Error("unexpected request")
+	}
+}
