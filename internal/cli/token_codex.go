@@ -161,7 +161,7 @@ func codexTokenCreate(cmd *cobra.Command, email string) error {
 		return err
 	}
 	blob, err := codex.SignIn(cmd.Context(), filepath.Join(backupDir(), "codex-login.lock"),
-		func(d codex.DeviceLogin) { announceCodexLogin(email, d) })
+		func(d codex.DeviceLogin) { announceCodexLogin(email, d, false) })
 	if err != nil {
 		return err
 	}

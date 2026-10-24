@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -100,6 +101,7 @@ func newLoginCmd() *cobra.Command {
 	var force bool
 	var manual bool
 	var code string
+	provider := providerAll
 
 	cmd := &cobra.Command{
 		Use:   "login",
@@ -113,95 +115,135 @@ func newLoginCmd() *cobra.Command {
 			"     After approving in step 1's URL, finishes the login with the response\n" +
 			"     its success page shows (a separate command, possibly a separate\n" +
 			"     terminal or process entirely).\n" +
-			"--manual always targets exactly one account, so pair it with --only.",
+			"--manual always targets exactly one account, so pair it with --only.\n\n" +
+			"After the Claude accounts, login signs in again every Codex profile whose login\n" +
+			"is stale or expired. --force takes every Codex profile that is not an API key.\n" +
+			"--only also matches a Codex label or email. --provider runs one pass only.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if code != "" && !manual {
 				return fmt.Errorf("--code requires --manual")
 			}
-			cfg, err := config.Load(config.DefaultPath())
-			if err != nil {
-				return err
+			switch provider {
+			case providerAll, providerClaude, providerCodex:
+			default:
+				return fmt.Errorf("--provider must be all, claude or codex, not %q", provider)
 			}
-			seq, err := account.LoadSequence(sequencePath())
-			if err != nil {
-				return err
-			}
-			if len(seq.Sequence) == 0 {
-				fmt.Println("No accounts are managed yet.")
-				return nil
-			}
-			b, err := resolveBackend(cfg)
-			if err != nil {
-				return fmt.Errorf("backend not available: %w", err)
-			}
-			// claude 2.x on macOS writes credentials to the login keychain,
-			// not a file under CLAUDE_CONFIG_DIR. LoginRotate/ManualLogin
-			// capture from the local backend's active slot when the legacy
-			// file is absent, so the local backend has to be passed in.
-			local, err := resolveLocalBackend()
-			if err != nil {
-				return fmt.Errorf("local backend not available: %w", err)
-			}
-
-			if manual {
-				if only == "" {
-					return fmt.Errorf("--manual requires --only <hash|email|index> — it logs in to exactly one account")
-				}
-				id := seq.Resolve(only)
-				if id == "" {
-					return fmt.Errorf("no account found matching: %s", only)
-				}
-				acct := seq.Accounts[id]
-				stateDir := filepath.Join(backupDir(), "pending-login-"+id)
-
-				if code == "" {
-					// Step 1: start, print the URL, return immediately —
-					// nothing here waits on a response.
-					url, err := refresh.ManualLoginStart(cmd.Context(), acct.Email, stateDir, local)
-					if err != nil {
-						return err
-					}
-					fmt.Printf("Manual login started for %s (%s) — no local browser will be opened.\n\n", id, acct.Email)
-					fmt.Println("Open this URL on any device to sign in:")
-					fmt.Println()
-					fmt.Println("  " + url)
-					fmt.Println()
-					fmt.Printf("Then finish with:\n  ccswitch login --only %s --manual --code \"<code#state>\"\n", id)
-					return nil
-				}
-
-				// Step 2: finish a login a prior --manual call started.
-				data, err := refresh.ManualLoginFinish(cmd.Context(), stateDir, code, local)
+			runClaude, runCodex := provider != providerCodex, provider != providerClaude
+			if only != "" {
+				seq, err := account.LoadSequence(sequencePath())
 				if err != nil {
 					return err
 				}
-				if err := b.Write(cmd.Context(), account.BackupCredKey(id, acct.Email), data); err != nil {
-					return fmt.Errorf("save credentials: %w", err)
+				onClaude := runClaude && seq.Resolve(only) != ""
+				onCodex := runCodex && codexProfileMatches(only)
+				if !onClaude && !onCodex {
+					return loginNoMatch(provider, only)
 				}
-				fmt.Printf("Credentials saved for %s (%s)\n", id, acct.Email)
-				return nil
+				runClaude, runCodex = onClaude, onCodex
 			}
-
-			// --only narrows the sequence to a single account.
-			target := seq
-			if only != "" {
-				id := seq.Resolve(only)
-				if id == "" {
-					return fmt.Errorf("no account found matching: %s", only)
+			if code != "" && !runClaude {
+				return fmt.Errorf("--code applies to Claude accounts only")
+			}
+			var claudeErr error
+			if runClaude {
+				claudeErr = loginClaude(cmd.Context(), only, force, manual, code)
+				if manual {
+					return claudeErr
 				}
-				narrowed := *seq
-				narrowed.Sequence = []string{id}
-				target = &narrowed
 			}
-
-			_, err = refresh.LoginRotate(cmd.Context(), target, b, local,
-				cfg.Refresh.ExpiryBuffer, force, cliLogger(false))
-			return err
+			if runCodex {
+				return errors.Join(claudeErr, loginCodex(cmd.Context(), only, force, manual))
+			}
+			return claudeErr
 		},
 	}
 	cmd.Flags().StringVar(&only, "only", "", "Log in to a single account (hash|email|index)")
 	cmd.Flags().BoolVar(&force, "force", false, "Re-login every selected account even if its credentials are valid")
 	cmd.Flags().BoolVar(&manual, "manual", false, "Log in without opening a local browser: print the URL and wait for a pasted response")
+	cmd.Flags().StringVar(&provider, "provider", providerAll, "Which logins to renew: all, claude or codex")
 	cmd.Flags().StringVar(&code, "code", "", "Supply the pasted response non-interactively (requires --manual)")
 	return cmd
+}
+
+// loginClaude is the Claude pass of login. The --manual flow runs here too.
+func loginClaude(ctx context.Context, only string, force, manual bool, code string) error {
+	cfg, err := config.Load(config.DefaultPath())
+	if err != nil {
+		return err
+	}
+	seq, err := account.LoadSequence(sequencePath())
+	if err != nil {
+		return err
+	}
+	if len(seq.Sequence) == 0 {
+		fmt.Println("No accounts are managed yet.")
+		return nil
+	}
+	b, err := resolveBackend(cfg)
+	if err != nil {
+		return fmt.Errorf("backend not available: %w", err)
+	}
+	// claude 2.x on macOS writes credentials to the login keychain,
+	// not a file under CLAUDE_CONFIG_DIR. LoginRotate/ManualLogin
+	// capture from the local backend's active slot when the legacy
+	// file is absent, so the local backend has to be passed in.
+	local, err := resolveLocalBackend()
+	if err != nil {
+		return fmt.Errorf("local backend not available: %w", err)
+	}
+
+	if manual {
+		if only == "" {
+			return fmt.Errorf("--manual requires --only <hash|email|index> — it logs in to exactly one account")
+		}
+		id := seq.Resolve(only)
+		if id == "" {
+			return fmt.Errorf("no account found matching: %s", only)
+		}
+		acct := seq.Accounts[id]
+		stateDir := filepath.Join(backupDir(), "pending-login-"+id)
+
+		if code == "" {
+			// Step 1: start, print the URL, return immediately —
+			// nothing here waits on a response.
+			url, err := refresh.ManualLoginStart(ctx, acct.Email, stateDir, local)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Manual login started for %s (%s) — no local browser will be opened.\n\n", id, acct.Email)
+			fmt.Println("Open this URL on any device to sign in:")
+			fmt.Println()
+			fmt.Println("  " + url)
+			fmt.Println()
+			fmt.Printf("Then finish with:\n  ccswitch login --only %s --manual --code \"<code#state>\"\n", id)
+			return nil
+		}
+
+		// Step 2: finish a login a prior --manual call started.
+		data, err := refresh.ManualLoginFinish(ctx, stateDir, code, local)
+		if err != nil {
+			return err
+		}
+		if err := b.Write(ctx, account.BackupCredKey(id, acct.Email), data); err != nil {
+			return fmt.Errorf("save credentials: %w", err)
+		}
+		fmt.Printf("Credentials saved for %s (%s)\n", id, acct.Email)
+		return nil
+	}
+
+	// --only narrows the sequence to a single account.
+	target := seq
+	if only != "" {
+		id := seq.Resolve(only)
+		if id == "" {
+			return fmt.Errorf("no account found matching: %s", only)
+		}
+		narrowed := *seq
+		narrowed.Sequence = []string{id}
+		target = &narrowed
+	}
+
+	_, err = refresh.LoginRotate(ctx, target, b, local,
+		cfg.Refresh.ExpiryBuffer, force, cliLogger(false))
+	return err
 }

@@ -56,7 +56,8 @@ Account Management:
   ccswitch list                       List all managed accounts
   ccswitch switch                     Pick an account interactively
   ccswitch switch-to <N|email>        Switch to a specific account
-  ccswitch login [--only X] [--force] Re-authenticate expired accounts
+  ccswitch login [--only X] [--force] [--provider all|claude|codex]
+                                      Re-authenticate expired accounts
   ccswitch refresh-all                Refresh expired OAuth tokens
   ccswitch prune [--apply]            Clear orphaned login-capture keychain records
 
@@ -165,6 +166,8 @@ and opens the sign-in page in the Chrome profile that is signed in to
 `<email>`. If no Chrome profile matches, it prints the address. It saves the
 login only when the signed-in email is `<email>`, and adds the profile to the
 end of the priority order.
+
+`ccswitch login` also signs in again every Codex profile whose login is stale or expired, after the Claude accounts. `--provider claude` or `--provider codex` runs one pass only, and `--only` matches a Codex label or email. A live profile gets the new login in `auth.json` too.
 
 `ccswitch codex add-key <label>` reads an OpenAI API key from stdin (or a no-echo prompt on a terminal) and saves it as a profile for CI and scripts. Codex writes the login in a temporary `CODEX_HOME`, and the live login does not change. Run `ccswitch codex use <label>` to make it live. API-key profiles come last in the priority order and autoswitch never picks them.
 

@@ -194,7 +194,7 @@ func newCodexLoginCmd() *cobra.Command {
 				return err
 			}
 
-			if _, err := codexSignInAndSave(cmd.Context(), b, reg, email, label); err != nil {
+			if _, err := codexSignInAndSave(cmd.Context(), b, reg, email, label, false); err != nil {
 				return err
 			}
 			fmt.Printf("Saved Codex profile %q: %s\n", label, describeProfile(reg.Profiles[label]))
@@ -206,11 +206,12 @@ func newCodexLoginCmd() *cobra.Command {
 }
 
 // codexSignInAndSave signs in a ChatGPT account in a temporary CODEX_HOME and
-// saves the login as profile label. It checks that the login belongs to email
+// saves the login as profile label. With manual set it prints the address
+// and opens no browser. It checks that the login belongs to email
 // and saves nothing when it does not. It saves reg and returns the new login.
-func codexSignInAndSave(ctx context.Context, b backend.Backend, reg *codex.Registry, email, label string) ([]byte, error) {
+func codexSignInAndSave(ctx context.Context, b backend.Backend, reg *codex.Registry, email, label string, manual bool) ([]byte, error) {
 	blob, err := codex.SignIn(ctx, filepath.Join(backupDir(), "codex-login.lock"),
-		func(d codex.DeviceLogin) { announceCodexLogin(email, d) })
+		func(d codex.DeviceLogin) { announceCodexLogin(email, d, manual) })
 	if err != nil {
 		return nil, err
 	}
@@ -307,13 +308,17 @@ func readAPIKey(in *os.File, prompt io.Writer) (string, error) {
 }
 
 // announceCodexLogin tells the user how to finish the sign-in. It opens the
-// address in the Chrome profile of email when one exists.
-func announceCodexLogin(email string, d codex.DeviceLogin) {
+// address in the Chrome profile of email when one exists, unless manual is set.
+func announceCodexLogin(email string, d codex.DeviceLogin, manual bool) {
 	if d.BrowserFallback && d.Code == "" {
 		fmt.Printf("Codex opened your default browser. Sign in as %s there.\n", email)
 		return
 	}
 	fmt.Printf("One-time code: %s\n", d.Code)
+	if manual {
+		fmt.Printf("Open this address on any device and sign in as %s:\n  %s\n", email, d.URL)
+		return
+	}
 	prof, found, err := browser.FindByEmail(email)
 	if err == nil && found && browser.OpenURL(prof.Directory, d.URL) == nil {
 		fmt.Printf("Opened %s in Chrome profile %q.\n", d.URL, prof.Name)
