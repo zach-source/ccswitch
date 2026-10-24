@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,14 +32,25 @@ const tokenPrefix = "sk-ant-oat01-"
 
 var (
 	ansiRe     = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[()][A-Za-z0-9]|\x1b[=>]`)
-	tokenRunRe = regexp.MustCompile(`sk-ant-oat01-[A-Za-z0-9_\-]*(?:[ \t]*\n[A-Za-z0-9_\-]+)*`)
+	tokenRunRe = regexp.MustCompile(`sk-ant-oat01-[A-Za-z0-9_\-]*(?:[ \t]*\n[ \t]*[A-Za-z0-9_\-]+)*`)
+	// cursorDownRe matches "cursor down n lines" (CSI n B), which the TUI
+	// uses in place of a newline.
+	cursorDownRe = regexp.MustCompile(`\x1b\[(\d*)B`)
 )
 
 // parseSetupToken finds the token in the typescript of `claude setup-token`.
-// It removes ANSI codes and carriage returns, then joins a token that the TUI
+// It turns cursor-down codes into newlines, removes other ANSI codes and
+// carriage returns, then joins a token that the TUI
 // wrapped over lines. A blank line ends the token. It returns the longest
 // token found, or "" when there is none.
 func parseSetupToken(out string) string {
+	out = cursorDownRe.ReplaceAllStringFunc(out, func(m string) string {
+		n, err := strconv.Atoi(cursorDownRe.FindStringSubmatch(m)[1])
+		if err != nil {
+			n = 1
+		}
+		return strings.Repeat("\n", n)
+	})
 	clean := strings.ReplaceAll(ansiRe.ReplaceAllString(out, ""), "\r", "")
 	best := ""
 	for _, run := range tokenRunRe.FindAllString(clean, -1) {

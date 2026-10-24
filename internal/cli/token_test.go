@@ -24,6 +24,15 @@ func TestParseSetupToken(t *testing.T) {
 			testToken,
 		},
 		{
+			// Claude Code 2.1.291 wraps the token with a cursor-down code, not a
+			// newline, and ends it with a two-line cursor-down.
+			"cursor-down wrap",
+			"\x1b[1B Your OAuth token (valid for 1 year):\x1b[K\x1b[1B\x1b[K\x1b[1B \x1b[38;2;255;193;7m" +
+				testToken[:cut] + "\x1b[1B\x1b[39m \x1b[38;2;255;193;7m" + testToken[cut:] +
+				"\x1b[1C\x1b[2B\x1b[38;2;153;153;153mStore this token securely.\x1b[1C\x1b[1B\x1b[39m\x1b[K",
+			testToken,
+		},
+		{
 			"ansi and carriage returns",
 			"\x1b[2K\x1b[1A\x1b[32m✓\x1b[39m Long-lived token created\r\n\r\n\x1b[1m" + testToken + "\x1b[22m\r\n\r\nStore it\r\n",
 			testToken,
