@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"time"
 )
@@ -98,7 +99,8 @@ func (r *Registry) Labels() []string {
 
 // Ordered returns the labels in switch order: Priority first, skipping
 // duplicates and labels with no profile, then every remaining label sorted.
-// A stale Priority entry therefore never breaks a switch.
+// A stale Priority entry therefore never breaks a switch. A promax profile
+// always comes before a pro profile; plans of the same rank keep this order.
 func (r *Registry) Ordered() []string {
 	out := make([]string, 0, len(r.Profiles))
 	seen := make(map[string]bool, len(r.Profiles))
@@ -113,5 +115,19 @@ func (r *Registry) Ordered() []string {
 			out = append(out, label)
 		}
 	}
+	slices.SortStableFunc(out, func(a, b string) int {
+		return planRank(r.Profiles[a].Plan) - planRank(r.Profiles[b].Plan)
+	})
 	return out
+}
+
+// planRank orders plans for switch order. A lower rank comes first.
+func planRank(plan string) int {
+	switch plan {
+	case "promax":
+		return 0
+	case "pro":
+		return 1
+	}
+	return 2
 }

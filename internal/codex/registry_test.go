@@ -39,7 +39,16 @@ func TestOrdered(t *testing.T) {
 			}
 		})
 	}
-	r := regWith(nil, "b", "a")
+	// promax always comes before pro, whatever the priority says. Plans of the
+	// same rank keep the priority order.
+	r := regWith([]string{"pro1", "plus", "max", "pro2"}, "pro1", "plus", "max", "pro2")
+	for l, plan := range map[string]string{"pro1": "pro", "plus": "plus", "max": "promax", "pro2": "pro"} {
+		r.Profiles[l] = codex.Profile{Label: l, Plan: plan}
+	}
+	if got, want := r.Ordered(), []string{"max", "pro1", "pro2", "plus"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("plan rank: Ordered() = %v, want %v", got, want)
+	}
+	r = regWith(nil, "b", "a")
 	if got, want := r.Ordered(), r.Labels(); !reflect.DeepEqual(got, want) {
 		t.Errorf("Ordered() = %v, Labels() = %v", got, want)
 	}

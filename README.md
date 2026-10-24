@@ -162,6 +162,8 @@ each profile at the same time. A profile whose access token has expired shows
 
 `ccswitch codex autoswitch --once [--threshold 80] [--cooldown 5m]` moves the
 live login to the first profile in priority order that is under the threshold.
+A `promax` profile always comes before a `pro` profile. The priority order
+applies between profiles with the same plan.
 Codex reads its login at session start, so a switch applies to the next
 session. Run it from a Codex `SessionStart` hook.
 
