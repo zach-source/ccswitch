@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -176,8 +177,20 @@ func TestSignIn_ReturnsAuthAndRemovesTempHome(t *testing.T) {
 	if _, err := os.Stat(string(home)); !os.IsNotExist(err) {
 		t.Errorf("temp CODEX_HOME %q still exists", home)
 	}
-	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+	if f, err := os.OpenFile(lock, os.O_RDWR, 0); err != nil || syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
 		t.Error("lock was not released")
+	}
+}
+
+// A lock file left behind by a killed sign-in must not block the next one.
+func TestSignIn_IgnoresLeftoverLockFile(t *testing.T) {
+	fakeCodex(t, `printf '{}' > "$CODEX_HOME/auth.json"`)
+	lock := filepath.Join(t.TempDir(), "login.lock")
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SignIn(context.Background(), lock, func(DeviceLogin) {}); err != nil {
+		t.Fatalf("SignIn with a leftover lock file: %v", err)
 	}
 }
 
@@ -199,14 +212,16 @@ func TestSignIn_FailureRemovesTempHome(t *testing.T) {
 func TestSignIn_RefusesWhenLockHeld(t *testing.T) {
 	fakeCodex(t, "exit 0")
 	lock := filepath.Join(t.TempDir(), "login.lock")
-	if err := os.Mkdir(lock, 0o700); err != nil {
+	f, err := os.Create(lock)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := SignIn(context.Background(), lock, func(DeviceLogin) {})
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+	_, err = SignIn(context.Background(), lock, func(DeviceLogin) {})
 	if err == nil || !strings.Contains(err.Error(), "another") {
 		t.Fatalf("err = %v, want an error about another sign-in", err)
-	}
-	if _, err := os.Stat(lock); err != nil {
-		t.Error("a held lock must stay in place")
 	}
 }

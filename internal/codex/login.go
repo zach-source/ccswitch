@@ -12,7 +12,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
+	"syscall"
 )
 
 // DeviceLogin collects what `codex login --device-auth` prints. Codex 0.160.1
@@ -107,25 +107,23 @@ func firstHTTPS(line string) string {
 	return "https://" + fields[0]
 }
 
-// staleSignInLock is the age after which a sign-in lock counts as left behind.
-// A device code lives 15 minutes, so no live sign-in runs longer.
-const staleSignInLock = 20 * time.Minute
-
 // SignIn runs `codex login --device-auth` in a new temporary CODEX_HOME and
 // returns the auth.json it wrote. The live login is never touched and the
 // temporary directory is always deleted. onReady runs once, when the address
 // and the code are known (or when Codex fell back to the browser login).
 //
-// lockPath is a directory lock. Codex listens on port 1455 for the browser
+// lockPath is a flock file. The kernel releases it when the process stops, so
+// a killed sign-in does not block the next one. Codex listens on port 1455 for the browser
 // login, so two sign-ins cannot run together.
 func SignIn(ctx context.Context, lockPath string, onReady func(DeviceLogin)) ([]byte, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
 		return nil, fmt.Errorf("create lock dir: %w", err)
 	}
-	if err := takeSignInLock(lockPath); err != nil {
+	unlock, err := takeSignInLock(lockPath)
+	if err != nil {
 		return nil, err
 	}
-	defer os.Remove(lockPath)
+	defer unlock()
 
 	home, err := os.MkdirTemp("", "ccswitch-codex-")
 	if err != nil {
@@ -185,21 +183,19 @@ func SignIn(ctx context.Context, lockPath string, onReady func(DeviceLogin)) ([]
 	return blob, nil
 }
 
-// takeSignInLock creates the lock directory. It replaces a stale one and
-// fails when a live one exists.
-func takeSignInLock(path string) error {
-	err := os.Mkdir(path, 0o700)
-	if errors.Is(err, os.ErrExist) {
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > staleSignInLock {
-			_ = os.Remove(path)
-			err = os.Mkdir(path, 0o700)
-		}
-	}
-	if errors.Is(err, os.ErrExist) {
-		return errors.New("another Codex sign-in is running; wait for it to finish")
-	}
+// takeSignInLock takes a non-blocking exclusive flock on path. It fails when
+// another process holds the lock.
+func takeSignInLock(path string) (unlock func(), err error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
-		return fmt.Errorf("take sign-in lock: %w", err)
+		return nil, fmt.Errorf("take sign-in lock: %w", err)
 	}
-	return nil
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, errors.New("another Codex sign-in is running; wait for it to finish")
+		}
+		return nil, fmt.Errorf("take sign-in lock: %w", err)
+	}
+	return func() { f.Close() }, nil
 }
