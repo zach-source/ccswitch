@@ -546,15 +546,21 @@ func renderUsageAll(rows []accountUsage) {
 			fmt.Printf("    %sUsage unavailable (rate limited or unreachable) — try again shortly%s\n", ansiYellow, ansiReset)
 		default:
 			h5, d7 := r.FiveHour, r.SevenDay
-			fmt.Printf("    5h:  %s%s %.0f%%%s  %sresets in %s%s\n",
-				pctColor(h5.Utilization), renderBar(h5.Utilization), h5.Utilization, ansiReset,
-				ansiDim, timeUntil(h5.ResetsAt), ansiReset)
-			fmt.Printf("    7d:  %s%s %.0f%%%s  %sresets in %s%s\n",
-				pctColor(d7.Utilization), renderBar(d7.Utilization), d7.Utilization, ansiReset,
-				ansiDim, timeUntil(d7.ResetsAt), ansiReset)
+			fmt.Print(usageBarLine("5h", h5.Utilization, timeUntil(h5.ResetsAt)))
+			fmt.Print(usageBarLine("7d", d7.Utilization, timeUntil(d7.ResetsAt)))
 		}
 		fmt.Println()
 	}
+}
+
+// usageBarLine renders one window: label, colored bar, percentage and the
+// time until reset. It prints no reset text when the reset is unknown.
+func usageBarLine(label string, pct float64, until string) string {
+	line := fmt.Sprintf("    %s:  %s%s %.0f%%%s", label, pctColor(pct), renderBar(pct), pct, ansiReset)
+	if until != "" {
+		line += fmt.Sprintf("  %sresets in %s%s", ansiDim, until, ansiReset)
+	}
+	return line + "\n"
 }
 
 // timeUntil renders the duration until an ISO-8601 timestamp ("3h 20m",
@@ -567,7 +573,11 @@ func timeUntil(iso string) string {
 	if err != nil {
 		return ""
 	}
-	d := time.Until(t)
+	return fmtUntil(time.Until(t))
+}
+
+// fmtUntil renders a duration as "3h 20m" or "2d 4h", "resetting" if past.
+func fmtUntil(d time.Duration) string {
 	if d <= 0 {
 		return "resetting"
 	}
