@@ -72,6 +72,12 @@ Codex CLI:
   ccswitch codex usage [--json]       Show rate-limit usage for each profile
   ccswitch codex autoswitch --once    Switch the live login when it is near its limit
 
+Long-lived tokens:
+  ccswitch token create <email|N>     Sign in and save a long-lived token (about 1 year)
+  ccswitch token get <email|N>        Print the token, for CLAUDE_CODE_OAUTH_TOKEN
+  ccswitch token list                 List saved tokens with their age (no token text)
+  ccswitch token remove <email|N>     Delete a saved token
+
 Usage Monitoring:
   ccswitch usage                      Show 5h block and weekly usage (active account)
   ccswitch usage-all [--json]         Show real usage for ALL accounts via API
@@ -169,6 +175,24 @@ A `promax` profile always comes before a `pro` profile. The priority order
 applies between profiles with the same plan.
 Codex reads its login at session start, so a switch applies to the next
 session. Run it from a Codex `SessionStart` hook.
+
+### Long-lived Claude tokens
+Scripts and CI cannot use a browser login. `ccswitch token create <email|N>`
+runs `claude setup-token` for that account. The sign-in opens in the Chrome
+profile of the account, as `ccswitch login` does. Claude prints a token that
+lasts about one year. ccswitch saves it in your backend as `Claude-Token-<email>`
+and does not print it. It needs `script(1)`, which macOS and most Linux systems
+have.
+
+```
+ccswitch token create work@example.com
+export CLAUDE_CODE_OAUTH_TOKEN=$(ccswitch token get work@example.com)
+claude -p "summarize this repo"
+```
+
+`token get` is the only command that prints a token. `token list` shows the
+created date and age. `token remove` deletes the saved copy. It does not revoke
+the token.
 
 ### Usage Monitoring
 `usage-all` queries the Anthropic OAuth usage API (`/api/oauth/usage`) for

@@ -2,9 +2,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +94,101 @@ func TestRunSetupToken_NoTokenIsAnError(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if _, err := runSetupToken(context.Background(), ""); err == nil {
 		t.Fatal("want an error when claude prints no token")
+	}
+}
+
+// useSetupToken makes `token create` get tok from a fake sign-in.
+func useSetupToken(t *testing.T, tok string) {
+	t.Helper()
+	old := setupTokenRunner
+	setupTokenRunner = func(context.Context, string) (string, error) { return tok, nil }
+	t.Cleanup(func() { setupTokenRunner = old })
+}
+
+func TestTokenCreate_SavesAndHidesToken(t *testing.T) {
+	home := newTestHome(t)
+	seqWith(t, "id1", "a@example.com", "id2", "b@example.com")
+	useSetupToken(t, testToken)
+
+	out, err := capture(t, func() error { return run(t, "token", "create", "2") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, testToken) || !strings.Contains(out, "Saved a long-lived token for b@example.com (expires about ") {
+		t.Errorf("unexpected output: %q", out)
+	}
+	var st savedToken
+	if err := json.Unmarshal(readCred(t, home, "Claude-Token-b@example.com"), &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Token != testToken || st.CreatedAt == "" {
+		t.Errorf("bad saved token: %+v", st)
+	}
+}
+
+func TestTokenCreate_RunnerFailureSavesNothing(t *testing.T) {
+	home := newTestHome(t)
+	seqWith(t, "id1", "a@example.com")
+	old := setupTokenRunner
+	setupTokenRunner = func(context.Context, string) (string, error) { return "", errors.New("cancelled") }
+	t.Cleanup(func() { setupTokenRunner = old })
+
+	if err := run(t, "token", "create", "a@example.com"); err == nil {
+		t.Fatal("want an error")
+	}
+	if got := readCred(t, home, "Claude-Token-a@example.com"); got != nil {
+		t.Errorf("saved %q", got)
+	}
+}
+
+func TestTokenGet_PrintsOnlyTheToken(t *testing.T) {
+	home := newTestHome(t)
+	seqWith(t, "id1", "a@example.com")
+	seedCred(t, home, "Claude-Token-a@example.com", []byte(`{"token":"`+testToken+`","createdAt":"2026-01-01T00:00:00Z"}`))
+
+	out, err := capture(t, func() error { return run(t, "token", "get", "a@example.com") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != testToken+"\n" {
+		t.Errorf("got %q", out)
+	}
+}
+
+func TestTokenGet_MissingIsAnError(t *testing.T) {
+	newTestHome(t)
+	seqWith(t, "id1", "a@example.com")
+	if err := run(t, "token", "get", "a@example.com"); err == nil {
+		t.Fatal("want an error")
+	}
+	if err := run(t, "token", "get", "nobody@example.com"); err == nil {
+		t.Fatal("want an error for an unknown account")
+	}
+}
+
+func TestTokenList_ShowsAgeNotToken(t *testing.T) {
+	home := newTestHome(t)
+	seqWith(t, "id1", "a@example.com", "id2", "b@example.com")
+	seedCred(t, home, "Claude-Token-a@example.com", []byte(`{"token":"`+testToken+`","createdAt":"2026-01-01T00:00:00Z"}`))
+
+	out, err := capture(t, func() error { return run(t, "token", "list") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "sk-ant") || !strings.Contains(out, "a@example.com  created 2026-01-01  age ") || strings.Contains(out, "b@example.com") {
+		t.Errorf("unexpected output: %q", out)
+	}
+}
+
+func TestTokenRemove_Deletes(t *testing.T) {
+	home := newTestHome(t)
+	seqWith(t, "id1", "a@example.com")
+	seedCred(t, home, "Claude-Token-a@example.com", []byte(`{"token":"`+testToken+`","createdAt":"2026-01-01T00:00:00Z"}`))
+
+	if err := run(t, "token", "remove", "1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := readCred(t, home, "Claude-Token-a@example.com"); got != nil {
+		t.Errorf("token still stored: %q", got)
 	}
 }
