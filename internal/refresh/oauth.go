@@ -188,16 +188,16 @@ func endpoint() string {
 	if base == "" {
 		return tokenURL
 	}
-	if err := checkTransport(base); err != nil {
+	if err := CheckTransport(base); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: ignoring CLAUDE_CODE_CUSTOM_OAUTH_URL: %v\n", err)
 		return tokenURL
 	}
 	return base + "/v1/oauth/token"
 }
 
-// checkTransport rejects a token endpoint that would send the refresh token
+// CheckTransport rejects a token endpoint that would send the refresh token
 // in the clear to a non-loopback host.
-func checkTransport(raw string) error {
+func CheckTransport(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("invalid URL %q: %w", raw, err)

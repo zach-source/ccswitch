@@ -191,11 +191,15 @@ func readSavedToken(ctx context.Context, b backend.Backend, email string) (saved
 }
 
 func newTokenCreateCmd() *cobra.Command {
-	return &cobra.Command{
+	var codexFlag bool
+	cmd := &cobra.Command{
 		Use:   "create <email|N>",
 		Short: "Sign in an account in its Chrome profile and save a long-lived token",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if codexFlag {
+				return codexTokenCreate(cmd, args[0])
+			}
 			email, b, err := tokenTarget(args[0])
 			if err != nil {
 				return err
@@ -220,6 +224,8 @@ func newTokenCreateCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&codexFlag, "codex", false, "Make a Codex token session (an auth.json) instead")
+	return cmd
 }
 
 // tokenOpenerShim installs the Chrome `open` shim for email, the same one
@@ -247,11 +253,19 @@ func tokenOpenerShim(email string) (string, func()) {
 }
 
 func newTokenGetCmd() *cobra.Command {
-	return &cobra.Command{
+	var codexFlag bool
+	var codexHome string
+	cmd := &cobra.Command{
 		Use:   "get <email|N>",
 		Short: "Print the saved token, for CLAUDE_CODE_OAUTH_TOKEN=$(ccswitch token get x)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if codexHome != "" && !codexFlag {
+				return errors.New("--codex-home requires --codex")
+			}
+			if codexFlag {
+				return codexTokenGet(cmd, args[0], codexHome)
+			}
 			email, b, err := tokenTarget(args[0])
 			if err != nil {
 				return err
@@ -264,6 +278,9 @@ func newTokenGetCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&codexFlag, "codex", false, "Print a Codex auth.json without a refresh token instead")
+	cmd.Flags().StringVar(&codexHome, "codex-home", "", "With --codex: write DIR/auth.json (mode 0600) instead of printing")
+	return cmd
 }
 
 func newTokenListCmd() *cobra.Command {
@@ -294,6 +311,9 @@ func newTokenListCmd() *cobra.Command {
 				found = true
 				fmt.Println(tokenLine(email, st, time.Now()))
 			}
+			if printCodexTokens(cmd.Context(), b) {
+				found = true
+			}
 			if !found {
 				fmt.Println("No saved tokens.")
 			}
@@ -313,11 +333,15 @@ func tokenLine(email string, st savedToken, now time.Time) string {
 }
 
 func newTokenRemoveCmd() *cobra.Command {
-	return &cobra.Command{
+	var codexFlag bool
+	cmd := &cobra.Command{
 		Use:   "remove <email|N>",
 		Short: "Delete the saved token from the store",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if codexFlag {
+				return codexTokenRemove(cmd, args[0])
+			}
 			email, b, err := tokenTarget(args[0])
 			if err != nil {
 				return err
@@ -329,4 +353,6 @@ func newTokenRemoveCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&codexFlag, "codex", false, "Revoke and delete a Codex token session instead")
+	return cmd
 }

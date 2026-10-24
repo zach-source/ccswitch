@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -76,6 +77,17 @@ func newRefreshAllCmd() *cobra.Command {
 			// Print the summary either way, then surface any partial-failure
 			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)
+			// Codex token sessions renew in the same pass.
+			renewed, cerr := renewCodexSessions(ctx, b, local, cliLogger(quiet))
+			if renewed > 0 {
+				fmt.Printf("refresh-all: %d Codex token session(s) renewed.\n", renewed)
+			}
+			if err != nil && cerr != nil {
+				return errors.Join(err, cerr)
+			}
+			if err == nil {
+				err = cerr
+			}
 			return err
 		},
 	}
