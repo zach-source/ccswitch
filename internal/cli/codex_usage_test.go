@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -105,26 +106,23 @@ func TestCodexUsage_StatusesAndText(t *testing.T) {
 	if got := atomic.LoadInt32(n); got != 4 {
 		t.Errorf("requests = %d, want 4 (stale profile makes none)", got)
 	}
-	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("got %d lines, want 5:\n%s", len(lines), out)
-	}
-	want := []string{
-		"* a  pro   weekly 41% (resets",
-		"  b  plus  5h 12% (resets",
-		"  c  ",
-		"  d  ",
-		"  e  ",
-	}
-	for i, w := range want {
-		if !strings.HasPrefix(lines[i], w) {
-			t.Errorf("line %d = %q, want prefix %q", i, lines[i], w)
-		}
-	}
-	for _, sub := range []string{"weekly 30% (resets", "expired", "unavailable", "stale (last used Oct 02)"} {
+	out = stripANSI(out)
+	for _, sub := range []string{
+		"Codex Accounts - Usage",
+		"◉ a [pro]", "○ b [plus]",
+		"7d:  ", " 41%  resets in 1h 5",
+		"5h:  ", " 12%  resets in",
+		" 30%  resets in",
+		"expired — run ccswitch codex login c@example.com",
+		"unavailable",
+		"stale (last used Oct 02)",
+	} {
 		if !strings.Contains(out, sub) {
 			t.Errorf("output lacks %q:\n%s", sub, out)
 		}
+	}
+	if strings.Contains(out, "weekly") {
+		t.Errorf("window should read 7d:\n%s", out)
 	}
 	if strings.Contains(out, ".sig") {
 		t.Errorf("output leaks token text:\n%s", out)
@@ -172,5 +170,32 @@ func TestCodexUsage_JSON(t *testing.T) {
 	}
 	if b.Live || b.Status != "stale" || b.Windows == nil {
 		t.Errorf("row b = %+v (windows must be an empty array, not null)", b)
+	}
+}
+
+var ansiRE = regexp.MustCompile("\x1b\\[[0-9;]*m")
+
+func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
+
+func TestCodexUsage_TextSample(t *testing.T) {
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	rows := []codexUsageRow{
+		{Label: "work", Plan: "promax", Live: true, Status: usageOK, Windows: []codex.Window{
+			{Seconds: 18000, UsedPercent: 0},
+			{Seconds: 604800, UsedPercent: 96, ResetAt: now.Add(22*time.Hour + 21*time.Minute)}}},
+		{Label: "key", Status: usageAPIKey},
+	}
+	var buf bytes.Buffer
+	if err := writeCodexUsageText(&buf, rows, now); err != nil {
+		t.Fatal(err)
+	}
+	want := "Codex Accounts - Usage\n\n" +
+		"  ◉ work [promax]\n" +
+		"    5h:  ░░░░░░░░░░░░░░░░░░░░ 0%\n" +
+		"    7d:  ███████████████████░ 96%  resets in 22h 21m\n\n" +
+		"  ○ key\n" +
+		"    api key (no usage)\n\n"
+	if got := stripANSI(buf.String()); got != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }

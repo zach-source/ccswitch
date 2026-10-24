@@ -8,7 +8,6 @@ import (
 	"io"
 	"strings"
 	"sync"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -46,27 +45,14 @@ func newCodexUsageCmd() *cobra.Command {
 		Short: "Show rate-limit usage for each Codex profile",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			reg, err := codex.LoadRegistry(codexRegistryPath())
+			rows, err := loadCodexUsage(cmd.Context(), time.Now())
 			if err != nil {
 				return err
 			}
-			if len(reg.Profiles) == 0 {
+			if len(rows) == 0 {
 				fmt.Fprintln(cmd.OutOrStdout(), "No Codex profiles captured yet. Run `ccswitch codex add <label>` while logged in.")
 				return nil
 			}
-			store, err := codexStoreFunc()
-			if err != nil {
-				return err
-			}
-			local, localErr := resolveLocalBackend()
-			if localErr != nil {
-				local = nil
-			}
-			live, err := codex.ReadLive()
-			if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
-				return fmt.Errorf("read the live Codex login: %w", err)
-			}
-			rows := collectCodexUsage(cmd.Context(), reg, store, local, live, time.Now())
 			if asJSON {
 				return writeCodexUsageJSON(cmd.OutOrStdout(), rows)
 			}
@@ -75,6 +61,31 @@ func newCodexUsageCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&asJSON, "json", false, "print JSON")
 	return cmd
+}
+
+// loadCodexUsage reads the registry, the stores and the live login, then
+// queries every profile. It returns no rows when no profile exists.
+func loadCodexUsage(ctx context.Context, now time.Time) ([]codexUsageRow, error) {
+	reg, err := codex.LoadRegistry(codexRegistryPath())
+	if err != nil {
+		return nil, err
+	}
+	if len(reg.Profiles) == 0 {
+		return nil, nil
+	}
+	store, err := codexStoreFunc()
+	if err != nil {
+		return nil, err
+	}
+	local, localErr := resolveLocalBackend()
+	if localErr != nil {
+		local = nil
+	}
+	live, err := codex.ReadLive()
+	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
+		return nil, fmt.Errorf("read the live Codex login: %w", err)
+	}
+	return collectCodexUsage(ctx, reg, store, local, live, now), nil
 }
 
 // collectCodexUsage queries every profile at once and returns one row per
@@ -177,53 +188,60 @@ func writeCodexUsageJSON(w io.Writer, rows []codexUsageRow) error {
 	return enc.Encode(out)
 }
 
+// writeCodexUsageText prints the rows in the style of `usage-all`.
 func writeCodexUsageText(w io.Writer, rows []codexUsageRow, now time.Time) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	var b strings.Builder
+	fmt.Fprintf(&b, "%sCodex Accounts - Usage%s\n\n", ansiBold, ansiReset)
 	for _, r := range rows {
-		mark := "  "
+		marker := ansiDim + "○" + ansiReset
 		if r.Live {
-			mark = "* "
+			marker = ansiCyan + "◉" + ansiReset
 		}
-		plan := r.Plan
-		if plan == "" {
-			plan = "-"
+		fmt.Fprintf(&b, "  %s %s%s%s", marker, ansiBold, r.Label, ansiReset)
+		if r.Plan != "" {
+			fmt.Fprintf(&b, " %s[%s]%s", ansiDim, r.Plan, ansiReset)
 		}
-		fmt.Fprintf(tw, "%s%s\t%s\t%s\n", mark, r.Label, plan, codexUsageDetail(r, now))
+		b.WriteString("\n")
+		if r.Status == usageOK && len(r.Windows) > 0 {
+			for _, win := range r.Windows {
+				until := ""
+				if !win.ResetAt.IsZero() {
+					until = fmtUntil(win.ResetAt.Sub(now))
+				}
+				b.WriteString(usageBarLine(codexWindowLabel(win), win.UsedPercent, until))
+			}
+		} else {
+			fmt.Fprintf(&b, "    %s%s%s\n", ansiDim, codexUsageNote(r), ansiReset)
+		}
+		b.WriteString("\n")
 	}
-	return tw.Flush()
+	_, err := io.WriteString(w, b.String())
+	return err
 }
 
-// codexUsageDetail is the last column of a text row.
-func codexUsageDetail(r codexUsageRow, now time.Time) string {
+// codexWindowLabel names a window like the Claude section does: 7d, not weekly.
+func codexWindowLabel(w codex.Window) string {
+	if w.Seconds == 604800 {
+		return "7d"
+	}
+	return w.Name()
+}
+
+// codexUsageNote is the one-line text for a row without bars.
+func codexUsageNote(r codexUsageRow) string {
 	switch r.Status {
 	case usageOK:
-		if len(r.Windows) == 0 {
-			return "no usage windows"
-		}
-		parts := make([]string, len(r.Windows))
-		for i, win := range r.Windows {
-			parts[i] = fmt.Sprintf("%s %.0f%%", win.Name(), win.UsedPercent)
-			if !win.ResetAt.IsZero() {
-				parts[i] += " (resets " + fmtReset(win.ResetAt, now) + ")"
-			}
-		}
-		return strings.Join(parts, "  ")
+		return "no usage windows"
 	case usageStale:
 		return "stale (last used " + r.LastUsed.Local().Format("Jan 02") + ")"
 	case usageExpired:
-		return "expired (sign in again with `ccswitch codex login`)"
+		who := r.Email
+		if who == "" {
+			who = r.Label
+		}
+		return "expired — run ccswitch codex login " + who
 	case usageAPIKey:
 		return "api key (no usage)"
 	}
 	return "unavailable"
-}
-
-// fmtReset prints a time of day for a reset today and the date and time
-// for a later one.
-func fmtReset(t, now time.Time) string {
-	t = t.Local()
-	if y1, m1, d1 := t.Date(); y1 == now.Year() && m1 == now.Month() && d1 == now.Day() {
-		return t.Format("15:04")
-	}
-	return t.Format("Jan 02 15:04")
 }
