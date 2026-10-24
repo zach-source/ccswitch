@@ -201,6 +201,22 @@ func TestTokenCodexGet_TransientErrorKeepsStoredSession(t *testing.T) {
 	}
 }
 
+// A temporary renewal failure must not stop a CI job while the current
+// access token still has hours left.
+func TestTokenCodexGet_TransientErrorUsesValidToken(t *testing.T) {
+	home := newTestHome(t)
+	ctEndpoints(t, 500)
+	access := ctSeed(t, home, time.Now().Add(20*time.Hour), "rt-secret")
+
+	out, err := capture(t, func() error { return run(t, "token", "get", "--codex", ctEmail) })
+	if err != nil {
+		t.Fatalf("get with a valid token and a 500 renewal: %v", err)
+	}
+	if gotAccess, _ := ctAuth(t, []byte(out)); gotAccess != access {
+		t.Errorf("output does not hold the current access token")
+	}
+}
+
 // ctFailingWrites is a backend whose Write fails.
 type ctFailingWrites struct{ backend.Backend }
 

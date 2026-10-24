@@ -85,15 +85,23 @@ func renewCodexTokenSession(ctx context.Context, store, local backend.Backend, e
 	if err != nil {
 		return nil, false, err
 	}
-	if exp, ok := codex.AccessTokenExpiry(blob); ok && time.Until(exp) >= codexTokenRenewBefore {
+	exp, ok := codex.AccessTokenExpiry(blob)
+	if ok && time.Until(exp) >= codexTokenRenewBefore {
 		return blob, false, nil
 	}
-	blob, err = codex.Refresh(ctx, blob)
+	fresh, err := codex.Refresh(ctx, blob)
 	if err != nil {
+		// A temporary failure leaves the refresh token unspent. Keep the
+		// current access token while it has more than an hour left.
+		if !errors.Is(err, codex.ErrSessionEnded) && ok && time.Until(exp) > time.Hour {
+			fmt.Fprintf(os.Stderr, "Warning: could not renew the Codex token session for %s (%v); the current access token is valid until %s.\n",
+				email, err, exp.Local().Format("2006-01-02 15:04"))
+			return blob, false, nil
+		}
 		return nil, false, err
 	}
-	saveCodexToken(ctx, store, local, email, blob)
-	return blob, true, nil
+	saveCodexToken(ctx, store, local, email, fresh)
+	return fresh, true, nil
 }
 
 // codexTokenEmails lists the emails of the Codex registry profiles, once each.
