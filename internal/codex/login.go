@@ -125,14 +125,11 @@ func SignIn(ctx context.Context, lockPath string, onReady func(DeviceLogin)) ([]
 	}
 	defer unlock()
 
-	home, err := os.MkdirTemp("", "ccswitch-codex-")
+	home, remove, err := tempCodexHome()
 	if err != nil {
-		return nil, fmt.Errorf("create temporary CODEX_HOME: %w", err)
+		return nil, err
 	}
-	defer os.RemoveAll(home)
-	if err := os.Chmod(home, 0o700); err != nil {
-		return nil, fmt.Errorf("protect temporary CODEX_HOME: %w", err)
-	}
+	defer remove()
 
 	cmd := exec.CommandContext(ctx, "codex", "login", "--device-auth")
 	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
@@ -198,4 +195,47 @@ func takeSignInLock(path string) (unlock func(), err error) {
 		return nil, fmt.Errorf("take sign-in lock: %w", err)
 	}
 	return func() { f.Close() }, nil
+}
+
+// tempCodexHome makes a private temporary CODEX_HOME. The caller runs remove.
+func tempCodexHome() (home string, remove func(), err error) {
+	home, err = os.MkdirTemp("", "ccswitch-codex-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temporary CODEX_HOME: %w", err)
+	}
+	remove = func() { os.RemoveAll(home) }
+	if err := os.Chmod(home, 0o700); err != nil {
+		remove()
+		return "", nil, fmt.Errorf("protect temporary CODEX_HOME: %w", err)
+	}
+	return home, remove, nil
+}
+
+// SaveAPIKey runs `codex login --with-api-key` in a new temporary CODEX_HOME
+// and returns the auth.json it wrote, so Codex picks the file format. The key
+// goes to Codex on stdin. The live login is never touched and the temporary
+// directory is always deleted.
+func SaveAPIKey(ctx context.Context, key string) ([]byte, error) {
+	home, remove, err := tempCodexHome()
+	if err != nil {
+		return nil, err
+	}
+	defer remove()
+
+	cmd := exec.CommandContext(ctx, "codex", "login", "--with-api-key")
+	cmd.Env = append(os.Environ(), "CODEX_HOME="+home)
+	cmd.Stdin = strings.NewReader(key + "\n")
+	// The output is never put in the error: it can hold the key.
+	if err := cmd.Run(); err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			return nil, fmt.Errorf("codex login failed: %w", exit)
+		}
+		return nil, fmt.Errorf("run codex: %w", err)
+	}
+	blob, err := os.ReadFile(filepath.Join(home, "auth.json"))
+	if err != nil {
+		return nil, fmt.Errorf("codex login wrote no auth.json: %w", err)
+	}
+	return blob, nil
 }

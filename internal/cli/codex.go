@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/zach-source/ccswitch/internal/browser"
 	"github.com/zach-source/ccswitch/internal/codex"
 	"github.com/zach-source/ccswitch/internal/config"
+	"golang.org/x/term"
 )
 
 func init() {
@@ -47,6 +49,7 @@ func newCodexCmd() *cobra.Command {
 		newCodexCurrentCmd(),
 		newCodexRemoveCmd(),
 		newCodexLoginCmd(),
+		newCodexAddKeyCmd(),
 		newCodexPriorityCmd(),
 		newCodexUsageCmd(),
 		newCodexAutoswitchCmd(),
@@ -223,6 +226,74 @@ func newCodexLoginCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&label, "label", "", "profile label (default: the email)")
 	return cmd
+}
+
+func newCodexAddKeyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add-key <label>",
+		Short: "Save an OpenAI API key as a Codex profile",
+		Long: "Read an OpenAI API key from stdin and save it as a profile for CI and\n" +
+			"scripts. Codex writes the login in a temporary CODEX_HOME. The live login\n" +
+			"is not changed. Run `ccswitch codex use <label>` to make it live.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			label := args[0]
+			key, err := readAPIKey(os.Stdin, os.Stderr)
+			if err != nil {
+				return err
+			}
+			b, err := codexStoreFunc()
+			if err != nil {
+				return err
+			}
+			reg, err := codex.LoadRegistry(codexRegistryPath())
+			if err != nil {
+				return err
+			}
+			blob, err := codex.SaveAPIKey(cmd.Context(), key)
+			if err != nil {
+				return err
+			}
+			id := codex.Describe(blob)
+			if id.Mode != "apikey" {
+				return errors.New("codex did not write an API key login — nothing was saved")
+			}
+			if err := b.Write(cmd.Context(), codex.CredKey(label), blob); err != nil {
+				return fmt.Errorf("save Codex credential: %w", err)
+			}
+			reg.Profiles[label] = codex.Profile{Label: label, Mode: id.Mode}
+			if !slices.Contains(reg.Priority, label) {
+				reg.Priority = append(reg.Priority, label)
+			}
+			if err := reg.Save(codexRegistryPath()); err != nil {
+				return err
+			}
+			fmt.Printf("Saved Codex profile %q: API key\n", label)
+			return nil
+		},
+	}
+}
+
+// readAPIKey reads the key from in. On a terminal it prompts on prompt and
+// reads without echo. The key is never an argument, so shell history misses it.
+func readAPIKey(in *os.File, prompt io.Writer) (string, error) {
+	var raw []byte
+	var err error
+	if term.IsTerminal(int(in.Fd())) {
+		fmt.Fprint(prompt, "OpenAI API key: ")
+		raw, err = term.ReadPassword(int(in.Fd()))
+		fmt.Fprintln(prompt)
+	} else {
+		raw, err = io.ReadAll(in)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read API key: %w", err)
+	}
+	key := strings.TrimSpace(string(raw))
+	if key == "" {
+		return "", errors.New("the API key is empty")
+	}
+	return key, nil
 }
 
 // announceCodexLogin tells the user how to finish the sign-in. It opens the

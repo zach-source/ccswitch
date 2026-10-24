@@ -67,6 +67,7 @@ Codex CLI:
   ccswitch codex current              Show the live Codex login
   ccswitch codex remove <label>       Forget a profile (the live login is untouched)
   ccswitch codex login <email>        Sign in an account in its Chrome profile and save it
+  ccswitch codex add-key <label>      Save an OpenAI API key from stdin as a profile
   ccswitch codex priority [label...]  Show or set the autoswitch order
   ccswitch codex usage [--json]       Show rate-limit usage for each profile
   ccswitch codex autoswitch --once    Switch the live login when it is near its limit
@@ -155,6 +156,8 @@ and opens the sign-in page in the Chrome profile that is signed in to
 `<email>`. If no Chrome profile matches, it prints the address. It saves the
 login only when the signed-in email is `<email>`, and adds the profile to the
 end of the priority order.
+
+`ccswitch codex add-key <label>` reads an OpenAI API key from stdin (or a no-echo prompt on a terminal) and saves it as a profile for CI and scripts. Codex writes the login in a temporary `CODEX_HOME`, and the live login does not change. Run `ccswitch codex use <label>` to make it live. API-key profiles come last in the priority order and autoswitch never picks them.
 
 `ccswitch codex usage` reads `https://chatgpt.com/backend-api/wham/usage` for
 each profile at the same time. A profile whose access token has expired shows

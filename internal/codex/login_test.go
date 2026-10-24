@@ -225,3 +225,37 @@ func TestSignIn_RefusesWhenLockHeld(t *testing.T) {
 		t.Fatalf("err = %v, want an error about another sign-in", err)
 	}
 }
+
+const fakeAPIKeyLogin = `[ "$1 $2" = "login --with-api-key" ] || exit 9
+key=$(cat)
+printf '{"auth_mode":"apikey","OPENAI_API_KEY":"%s"}' "$key" > "$CODEX_HOME/auth.json"`
+
+func TestSaveAPIKey_PassesKeyOnStdinAndRemovesTempHome(t *testing.T) {
+	homeFile := fakeCodex(t, fakeAPIKeyLogin)
+	blob, err := SaveAPIKey(context.Background(), "sk-test-123")
+	if err != nil {
+		t.Fatalf("SaveAPIKey: %v", err)
+	}
+	if string(blob) != `{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test-123"}` {
+		t.Errorf("blob = %q", blob)
+	}
+	home, _ := os.ReadFile(homeFile)
+	if _, err := os.Stat(string(home)); !os.IsNotExist(err) {
+		t.Errorf("temp CODEX_HOME %q still exists", home)
+	}
+}
+
+func TestSaveAPIKey_FailureHidesKeyAndRemovesTempHome(t *testing.T) {
+	homeFile := fakeCodex(t, `cat >&2; echo "bad key" >&2; exit 3`)
+	_, err := SaveAPIKey(context.Background(), "sk-secret-456")
+	if err == nil {
+		t.Fatal("want an error for a non-zero exit")
+	}
+	if strings.Contains(err.Error(), "sk-secret-456") || strings.Contains(err.Error(), "bad key") {
+		t.Errorf("error leaks key or codex output: %v", err)
+	}
+	home, _ := os.ReadFile(homeFile)
+	if _, err := os.Stat(string(home)); !os.IsNotExist(err) {
+		t.Errorf("temp CODEX_HOME %q still exists", home)
+	}
+}
