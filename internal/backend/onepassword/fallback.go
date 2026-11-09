@@ -10,9 +10,11 @@ import (
 // CLIFallback layers the user's op CLI session under a Connect backend to cover
 // two gaps in a read-only-token / CLI-written-item deployment:
 //
-//   - Writes: a Connect token's read/write scope is fixed at creation, so a
-//     read-only token 403s on login's credential write. Write/Delete retry
-//     through the op CLI (full user permissions) on a 403.
+//   - Writes: every write goes through the op CLI, so items stay op
+//     documents. Connect cannot change a document's file: a PUT gets 400
+//     "Item body does not match Item path". A Connect create also makes a
+//     Secure Note, which `op document get` cannot read. Delete tries Connect
+//     first and uses the op CLI on a 403 (a read-only token).
 //   - Reads: the CLI backend stores credentials as op *documents*. Connect's
 //     Read fetches a document's attached file itself, but reports ErrNotFound
 //     when it can't (missing item, file fetch refused). Read retries through
@@ -26,8 +28,8 @@ type CLIFallback struct {
 	cli     *CLIBackend
 }
 
-// NewCLIFallback wraps primary so reads fall back to cli on ErrNotFound and
-// writes/deletes fall back to cli on a permission-denied (403) response.
+// NewCLIFallback wraps primary so reads fall back to cli on ErrNotFound,
+// writes always use cli, and deletes fall back to cli on a 403.
 func NewCLIFallback(primary *Backend, cli *CLIBackend) *CLIFallback {
 	return &CLIFallback{primary: primary, cli: cli}
 }
@@ -47,11 +49,7 @@ func (w *CLIFallback) HealthCheck(ctx context.Context) error {
 }
 
 func (w *CLIFallback) Write(ctx context.Context, key string, data []byte) error {
-	err := w.primary.Write(ctx, key, data)
-	if isPermissionDenied(err) {
-		return w.cli.Write(ctx, key, data)
-	}
-	return err
+	return w.cli.Write(ctx, key, data)
 }
 
 func (w *CLIFallback) Delete(ctx context.Context, key string) error {
