@@ -90,7 +90,7 @@ func runCodexAutoswitch(ctx context.Context, out io.Writer, threshold float64, c
 	if err != nil {
 		return err
 	}
-	local, localErr := resolveLocalBackend()
+	local, localErr := codexLocalBackend()
 	if localErr != nil {
 		local = nil
 	}

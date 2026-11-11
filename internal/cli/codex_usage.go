@@ -77,7 +77,7 @@ func loadCodexUsage(ctx context.Context, now time.Time) ([]codexUsageRow, error)
 	if err != nil {
 		return nil, err
 	}
-	local, localErr := resolveLocalBackend()
+	local, localErr := codexLocalBackend()
 	if localErr != nil {
 		local = nil
 	}

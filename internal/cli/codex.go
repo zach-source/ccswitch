@@ -366,7 +366,7 @@ func newCodexUseCmd() *cobra.Command {
 			}
 			// The local backend holds the fallback copy. It stays nil when
 			// it cannot be resolved; the store is then the only copy.
-			local, localErr := resolveLocalBackend()
+			local, localErr := codexLocalBackend()
 			if localErr != nil {
 				local = nil
 			}

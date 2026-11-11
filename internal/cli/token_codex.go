@@ -44,7 +44,7 @@ func lockFileWait(name string, wait time.Duration) (func(), error) {
 
 // codexTokenLocal returns the local backend, or nil when it is not available.
 func codexTokenLocal() backend.Backend {
-	local, err := resolveLocalBackend()
+	local, err := codexLocalBackend()
 	if err != nil {
 		return nil
 	}

@@ -79,7 +79,7 @@ func newRefreshAllCmd() *cobra.Command {
 			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)
 			// Codex token sessions renew in the same pass.
-			renewed, cerr := renewCodexSessions(ctx, b, local, cliLogger(quiet))
+			renewed, cerr := renewCodexSessions(ctx, b, codexTokenLocal(), cliLogger(quiet))
 			if renewed > 0 {
 				fmt.Printf("refresh-all: %d Codex token session(s) renewed.\n", renewed)
 			}
