@@ -16,7 +16,7 @@
       system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        version = "2.13.0";
+        version = "2.13.1";
       in
       {
         packages = {
