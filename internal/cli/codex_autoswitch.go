@@ -107,7 +107,7 @@ func runCodexAutoswitch(ctx context.Context, out io.Writer, threshold float64, c
 		liveLabel, _ = codex.MatchProfile(reg, live)
 	}
 	now := time.Now()
-	rows := collectCodexUsage(ctx, reg, b, local, live, now)
+	rows := collectCodexUsage(ctx, reg, b, local, live, now, true)
 	cooldownActive := now.Sub(reg.LastSwitch) < cooldown
 	target, reason := decideCodexSwitch(rows, liveLabel, reg.Ordered(), threshold, cooldownActive)
 	if target == "" {

@@ -214,3 +214,9 @@ func WithoutRefreshToken(blob []byte) ([]byte, error) {
 	s.set("refresh_token", "")
 	return s.bytes()
 }
+
+// HasRefreshToken tells whether the auth.json holds a refresh token.
+func HasRefreshToken(blob []byte) bool {
+	s, err := parseSession(blob)
+	return err == nil && s.get("refresh_token") != ""
+}

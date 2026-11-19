@@ -145,9 +145,10 @@ in the same backend as your Claude accounts — Keychain, file, 1Password, or
 Vault — and restores it on demand. Switching saves the login it replaces
 first, so a token Codex rotated on its own is never rolled back.
 
-ccswitch never mints or exchanges a Codex token; Codex refreshes its own. The
-only writes are a whole-file save and restore, so an upstream schema change
-cannot corrupt a profile. Codex builds configured with
+Codex refreshes the live login itself. ccswitch refreshes the stored profiles
+that are not live, when `refresh-all` runs or `codex usage` finds a token that
+is near expiry. Apart from that, it only saves and restores the whole file, so
+an upstream schema change cannot corrupt a profile. Codex builds configured with
 `cli_auth_credentials_store = "keyring"` keep the login in the OS keyring
 rather than `auth.json`; ccswitch cannot address that and refuses rather than
 silently capturing nothing.
@@ -173,7 +174,8 @@ end of the priority order.
 
 `ccswitch codex usage` reads `https://chatgpt.com/backend-api/wham/usage` for
 each profile at the same time. A profile whose access token has expired shows
-`stale` and sends no request, because ccswitch does not refresh Codex tokens.
+`stale` and sends no request. A profile that is not live is refreshed first,
+and shows `stale` only if the refresh fails.
 The text output has the same bars as `usage-all`: one line for each window
 (`5h`, `7d`) with a color-coded percentage and the time until reset. `◉` marks
 the live profile. `--json` output is not changed.
@@ -216,8 +218,8 @@ ccswitch token get --codex work@example.com --codex-home "$CODEX_HOME"
 saves the result as `Codex-Token-<email>` and does not touch your live Codex
 login or your Codex profiles. This session is separate, and only ccswitch
 holds its refresh token. `token get --codex` and `refresh-all` renew it when
-the access token has less than 24 hours left. They renew only these dedicated
-sessions, never your Codex profiles.
+the access token has less than 24 hours left. `refresh-all` renews your
+stored Codex profiles by the same rule, but never the live login.
 
 The file that `token get --codex` prints has `refresh_token` set to `""`. CI
 cannot rotate the session, so it cannot break it. The access token lasts 10

@@ -51,42 +51,51 @@ func codexTokenLocal() backend.Backend {
 	return local
 }
 
-// saveCodexToken writes the session to the store. When that fails it writes
-// the local copy and warns. When both fail it warns that the session is lost.
-func saveCodexToken(ctx context.Context, store, local backend.Backend, email string, blob []byte) {
-	key := codexTokenKey(email)
+// saveCodexBlob writes the credential to the store. If that fails, it writes
+// the local copy and warns. If both fail, it warns that the credential is
+// lost. what names the credential. again is the command that signs in again.
+func saveCodexBlob(ctx context.Context, store, local backend.Backend, key, what, again string, blob []byte) {
 	storeErr := store.Write(ctx, key, blob)
 	if storeErr == nil {
 		return
 	}
 	if local != nil && local != store {
 		if localErr := local.Write(ctx, key, blob); localErr == nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not save the Codex token session for %s to the store (%v); saved a local copy.\n", email, storeErr)
+			fmt.Fprintf(os.Stderr, "Warning: could not save the %s to the store (%v); saved a local copy.\n", what, storeErr)
 			return
 		}
 	}
-	fmt.Fprintf(os.Stderr, "Warning: could not save the renewed Codex token session for %s (%v). "+
-		"The old refresh token is now spent: run `ccswitch token create --codex %s` again.\n", email, storeErr, email)
+	fmt.Fprintf(os.Stderr, "Warning: could not save the renewed %s (%v). "+
+		"The old refresh token is now spent: run `%s` again.\n", what, storeErr, again)
 }
 
-// renewCodexTokenSession returns the session of email. It renews the tokens
-// first when the access token has under codexTokenRenewBefore left. renewed
-// tells whether it did. It holds the per-email lock, so two processes never
-// spend the same refresh token. A missing session returns backend.ErrNotFound.
-func renewCodexTokenSession(ctx context.Context, store, local backend.Backend, email string) (blob []byte, renewed bool, err error) {
-	name := "codex-token-" + strings.ReplaceAll(strings.ToLower(email), "/", "_") + ".lock"
-	unlock, err := lockFileWait(name, codexTokenLockWait)
+// codexRenewTarget names one stored Codex credential for renewCodexBlob.
+type codexRenewTarget struct {
+	lock        string // lock file name
+	key         string // backend key
+	what        string // text for messages
+	again       string // command that signs in again
+	skipUnknown bool   // skip a credential with no readable expiry
+}
+
+// renewCodexBlob returns the credential of the target. It renews the tokens
+// first when the access token has less than codexTokenRenewBefore left.
+// renewed tells whether it did. It holds the target lock, so two processes
+// never spend the same refresh token. A missing credential returns
+// backend.ErrNotFound.
+func renewCodexBlob(ctx context.Context, store, local backend.Backend, tgt codexRenewTarget) (blob []byte, renewed bool, err error) {
+	unlock, err := lockFileWait(tgt.lock, codexTokenLockWait)
 	if err != nil {
 		return nil, false, err
 	}
 	defer unlock()
 
-	blob, err = codexFresher(ctx, store, local, codexTokenKey(email))
+	blob, err = codexFresher(ctx, store, local, tgt.key)
 	if err != nil {
 		return nil, false, err
 	}
 	exp, ok := codex.AccessTokenExpiry(blob)
-	if ok && time.Until(exp) >= codexTokenRenewBefore {
+	if (ok && time.Until(exp) >= codexTokenRenewBefore) || (!ok && tgt.skipUnknown) {
 		return blob, false, nil
 	}
 	fresh, err := codex.Refresh(ctx, blob)
@@ -94,14 +103,26 @@ func renewCodexTokenSession(ctx context.Context, store, local backend.Backend, e
 		// A temporary failure leaves the refresh token unspent. Keep the
 		// current access token while it has more than an hour left.
 		if !errors.Is(err, codex.ErrSessionEnded) && ok && time.Until(exp) > time.Hour {
-			fmt.Fprintf(os.Stderr, "Warning: could not renew the Codex token session for %s (%v); the current access token is valid until %s.\n",
-				email, err, exp.Local().Format("2006-01-02 15:04"))
+			fmt.Fprintf(os.Stderr, "Warning: could not renew the %s (%v); the current access token is valid until %s.\n",
+				tgt.what, err, exp.Local().Format("2006-01-02 15:04"))
 			return blob, false, nil
 		}
 		return nil, false, err
 	}
-	saveCodexToken(ctx, store, local, email, fresh)
+	saveCodexBlob(ctx, store, local, tgt.key, tgt.what, tgt.again, fresh)
 	return fresh, true, nil
+}
+
+// renewCodexTokenSession returns the session of email. It renews the tokens
+// first when the access token has less than codexTokenRenewBefore left.
+// renewed tells whether it did. A missing session returns backend.ErrNotFound.
+func renewCodexTokenSession(ctx context.Context, store, local backend.Backend, email string) (blob []byte, renewed bool, err error) {
+	return renewCodexBlob(ctx, store, local, codexRenewTarget{
+		lock:  "codex-token-" + strings.ReplaceAll(strings.ToLower(email), "/", "_") + ".lock",
+		key:   codexTokenKey(email),
+		what:  "Codex token session for " + email,
+		again: "ccswitch token create --codex " + email,
+	})
 }
 
 // codexTokenEmails lists the emails of the Codex registry profiles, once each.

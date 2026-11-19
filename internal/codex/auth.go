@@ -13,10 +13,10 @@
 //	  "last_refresh": "2026-09-16T…Z"
 //	}
 //
-// Everything here treats that blob as opaque bytes. Codex refreshes its own
-// tokens and ccswitch never mints or exchanges one — the only writes are a
-// whole-file save and restore, so a schema change upstream cannot corrupt a
-// profile.
+// Everything here treats that blob as opaque bytes. Codex refreshes the live
+// login itself. ccswitch refreshes the stored profiles that are not live.
+// Apart from that, it only saves and restores the whole file, so a schema
+// change upstream cannot corrupt a profile.
 package codex
 
 import (

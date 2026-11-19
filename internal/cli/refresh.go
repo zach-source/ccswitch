@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -83,13 +84,23 @@ func newRefreshAllCmd() *cobra.Command {
 			if renewed > 0 {
 				fmt.Printf("refresh-all: %d Codex token session(s) renewed.\n", renewed)
 			}
-			if err != nil && cerr != nil {
-				return errors.Join(err, cerr)
+			// Stored Codex profiles renew too. Save the live login first, so
+			// the copy is not older than the file Codex keeps up to date.
+			// The switch lock keeps a switch from reading a profile while its
+			// refresh token rotates.
+			var perr error
+			if unlock, lerr := lockFileWait("codex-autoswitch.lock", 30*time.Second); lerr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: skipped the Codex profiles: %v\n", lerr)
+			} else {
+				syncLiveCodex(ctx, b, codexTokenLocal())
+				var pn int
+				pn, perr = renewCodexProfiles(ctx, b, codexTokenLocal(), cliLogger(quiet))
+				unlock()
+				if pn > 0 {
+					fmt.Printf("refresh-all: %d Codex profile(s) renewed.\n", pn)
+				}
 			}
-			if err == nil {
-				err = cerr
-			}
-			return err
+			return errors.Join(err, cerr, perr)
 		},
 	}
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "Only print warnings and the final summary")

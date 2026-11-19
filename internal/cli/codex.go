@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/backend"
@@ -36,8 +37,9 @@ func newCodexCmd() *cobra.Command {
 			"Codex keeps one login at a time in $CODEX_HOME/auth.json (default ~/.codex).\n" +
 			"These commands capture that file into a named profile stored in the same\n" +
 			"ccswitch backend as your Claude accounts, and restore it on demand.\n\n" +
-			"Codex refreshes its own tokens; ccswitch only ever saves and restores the\n" +
-			"file whole, so a schema change upstream cannot corrupt a profile.\n\n" +
+			"Codex refreshes the live login itself. ccswitch refreshes the saved profiles\n" +
+			"that are not live. It saves and restores the file whole, so a schema change\n" +
+			"upstream cannot corrupt a profile.\n\n" +
 			"  ccswitch codex add work     # capture the current login as \"work\"\n" +
 			"  ccswitch codex use personal # make \"personal\" the live login\n" +
 			"  ccswitch codex list",
@@ -353,6 +355,9 @@ func newCodexPriorityCmd() *cobra.Command {
 	}
 }
 
+// codexUseLockWait is how long `codex use` waits for the autoswitch lock.
+var codexUseLockWait = 5 * time.Second
+
 func newCodexUseCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "use <label>",
@@ -360,6 +365,12 @@ func newCodexUseCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			label := args[0]
+			// Wait for autoswitch, so the two cannot switch at the same time.
+			unlock, err := lockFileWait("codex-autoswitch.lock", codexUseLockWait)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			b, err := codexStoreFunc()
 			if err != nil {
 				return err
@@ -539,6 +550,29 @@ func newCodexCurrentCmd() *cobra.Command {
 	}
 }
 
+// revokeRemovedCodex revokes the refresh token of the profile before its
+// removal. A failure is a warning. It does not revoke an API-key profile or a
+// credential with no refresh token. It does not revoke the live login, because
+// that signs the user out of Codex.
+func revokeRemovedCodex(ctx context.Context, reg *codex.Registry, label string, store, local backend.Backend) {
+	blob, err := codexFresher(ctx, store, local, codex.CredKey(label))
+	if err != nil || codex.Describe(blob).Mode == "apikey" || !codex.HasRefreshToken(blob) {
+		return
+	}
+	live, err := codex.ReadLive()
+	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
+		fmt.Fprintf(os.Stderr, "Warning: could not read the live Codex login, so ccswitch did not revoke %q: %v\n", label, err)
+		return
+	}
+	if liveLabel, ok := codex.MatchProfile(reg, live); ok && len(live) > 0 && liveLabel == label {
+		fmt.Printf("Profile %q is the live login, so ccswitch left it signed in.\n", label)
+		return
+	}
+	if err := codex.Revoke(ctx, blob); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not revoke the session of %q: %v\n", label, err)
+	}
+}
+
 func newCodexRemoveCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "remove <label>",
@@ -554,11 +588,20 @@ func newCodexRemoveCmd() *cobra.Command {
 				return fmt.Errorf("no Codex profile named %q", label)
 			}
 
+			ctx := cmd.Context()
+			key := codex.CredKey(label)
 			cfg, cfgErr := config.Load(config.DefaultPath())
 			if cfgErr == nil {
 				if b, bErr := resolveBackend(cfg); bErr == nil {
-					if delErr := b.Delete(cmd.Context(), codex.CredKey(label)); delErr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: could not delete the stored credential: %v\n", delErr)
+					local := codexTokenLocal()
+					revokeRemovedCodex(ctx, reg, label, b, local)
+					for _, c := range []backend.Backend{b, local} {
+						if c == nil {
+							continue
+						}
+						if delErr := c.Delete(ctx, key); delErr != nil && !errors.Is(delErr, backend.ErrNotFound) {
+							fmt.Fprintf(os.Stderr, "Warning: could not delete a stored credential: %v\n", delErr)
+						}
 					}
 				}
 			}

@@ -81,17 +81,29 @@ func loadCodexUsage(ctx context.Context, now time.Time) ([]codexUsageRow, error)
 	if localErr != nil {
 		local = nil
 	}
+	// Renew stale profiles only while no switch can run. If autoswitch or
+	// `codex use` holds the lock, show the rows without a renewal.
+	unlock, renew, err := lockFile("codex-autoswitch.lock")
+	if err != nil {
+		return nil, err
+	}
+	if renew {
+		defer unlock()
+	}
 	live, err := codex.ReadLive()
 	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
 		return nil, fmt.Errorf("read the live Codex login: %w", err)
 	}
-	return collectCodexUsage(ctx, reg, store, local, live, now), nil
+	return collectCodexUsage(ctx, reg, store, local, live, now, renew), nil
 }
 
 // collectCodexUsage queries every profile at once and returns one row per
 // profile in priority order. The live profile uses the live auth.json, since
 // Codex rotates its tokens there; the others use the fresher stored copy.
-func collectCodexUsage(ctx context.Context, reg *codex.Registry, store, local backend.Backend, live []byte, now time.Time) []codexUsageRow {
+//
+// When renew is true, it renews a stale profile that is not live. The caller
+// must then hold codex-autoswitch.lock, so no switch runs at the same time.
+func collectCodexUsage(ctx context.Context, reg *codex.Registry, store, local backend.Backend, live []byte, now time.Time, renew bool) []codexUsageRow {
 	liveLabel, _ := codex.MatchProfile(reg, live)
 	if len(live) == 0 {
 		liveLabel = ""
@@ -107,12 +119,31 @@ func collectCodexUsage(ctx context.Context, reg *codex.Registry, store, local ba
 			var readErr error
 			if label != liveLabel {
 				blob, readErr = codexFresher(ctx, store, local, codex.CredKey(label))
+				if renew {
+					blob = renewStaleCodex(ctx, store, local, label, blob, readErr, now)
+				}
 			}
 			rows[i] = codexUsageFor(ctx, reg.Profiles[label], label == liveLabel, blob, readErr, now)
 		}()
 	}
 	wg.Wait()
 	return rows
+}
+
+// renewStaleCodex renews a stored profile whose access token has expired or
+// is near expiry. It returns blob when the renewal fails or is not needed, so
+// the row keeps its status. The live profile never comes here: Codex renews it.
+func renewStaleCodex(ctx context.Context, store, local backend.Backend, label string, blob []byte, readErr error, now time.Time) []byte {
+	if readErr != nil || codex.Describe(blob).Mode == "apikey" {
+		return blob
+	}
+	if exp, ok := codex.AccessTokenExpiry(blob); !ok || exp.Sub(now) >= codexTokenRenewBefore {
+		return blob
+	}
+	if fresh, _, err := renewCodexProfile(ctx, store, local, label); err == nil {
+		return fresh
+	}
+	return blob
 }
 
 // codexUsageFor builds one row. It makes no request for a stale token or an
