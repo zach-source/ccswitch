@@ -211,3 +211,22 @@ func TestRefresh_IgnoresUnsafeOverride(t *testing.T) {
 		t.Error("unexpected request")
 	}
 }
+
+func TestRefresh_DoesNotFollowRedirects(t *testing.T) {
+	hit := false
+	second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	defer second.Close()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL, http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+	t.Setenv("CCSWITCH_CODEX_REFRESH_URL", first.URL)
+	t.Setenv("CCSWITCH_CODEX_REVOKE_URL", first.URL)
+	if _, err := Refresh(context.Background(), sessionBlob(t, "at", "rt")); err == nil {
+		t.Error("Refresh: want an error for a redirect")
+	}
+	_ = Revoke(context.Background(), sessionBlob(t, "at", "rt"))
+	if hit {
+		t.Fatal("the redirect target received the refresh token")
+	}
+}

@@ -15,7 +15,11 @@ import (
 	"github.com/zach-source/ccswitch/internal/refresh"
 )
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// noRedirect stops the client from following a redirect: a 307 would resend
+// the refresh token in the body to the host it names.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+var httpClient = &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirect}
 
 // checkIssuer is the issuer rule. The issuer comes from the credential file,
 // so a crafted file could send the refresh token to any host. Only https

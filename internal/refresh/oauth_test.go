@@ -141,3 +141,22 @@ func TestEndpointHonoursCustomOAuthURL(t *testing.T) {
 		t.Errorf("clientID() = %q, want custom-id", got)
 	}
 }
+
+func TestRefreshOneDoesNotFollowRedirects(t *testing.T) {
+	hit := false
+	second := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit = true }))
+	defer second.Close()
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL, http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+	prev := tokenURL
+	tokenURL = first.URL
+	defer func() { tokenURL = prev }()
+	if _, _, err := RefreshOne(context.Background(), []byte(storedBlob)); err == nil {
+		t.Error("want an error for a redirect")
+	}
+	if hit {
+		t.Fatal("the redirect target received the refresh token")
+	}
+}

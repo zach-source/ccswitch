@@ -27,7 +27,11 @@ const (
 // again. The session must be created again.
 var ErrSessionEnded error = &kindError{"the session has ended", provider.ErrSessionEnded}
 
-var httpClient = &http.Client{Timeout: 10 * time.Second}
+// noRedirect stops the client from following a redirect: a 307 would resend
+// the refresh token in the body to the host it names.
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+var httpClient = &http.Client{Timeout: 10 * time.Second, CheckRedirect: noRedirect}
 
 // endedCodes are the error codes that end a session for good. Codex treats
 // them the same way (login/src/auth/manager.rs, rust-v0.164.0).

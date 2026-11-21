@@ -409,3 +409,34 @@ func trimNL(b []byte) []byte {
 	}
 	return b
 }
+
+// redirectPair returns a server that 307-redirects every request to a second
+// server, and a pointer that tells whether the second one got a request.
+func redirectPair(t *testing.T) (first *httptest.Server, secondHit *bool) {
+	t.Helper()
+	hit := false
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hit = true
+		_, _ = w.Write([]byte(`{"access_token":"x","expires_in":3600}`))
+	}))
+	t.Cleanup(second.Close)
+	first = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, second.URL+r.URL.Path, http.StatusTemporaryRedirect)
+	}))
+	t.Cleanup(first.Close)
+	return first, &hit
+}
+
+func TestRefreshAndRevokeDoNotFollowRedirects(t *testing.T) {
+	allowAny(t)
+	srv, hit := redirectPair(t)
+	if _, err := Refresh(context.Background(), fixture(srv.URL)); err == nil {
+		t.Error("Refresh: want an error for a redirect")
+	}
+	if err := Revoke(context.Background(), fixture(srv.URL)); err == nil {
+		t.Error("Revoke: want an error for a redirect")
+	}
+	if *hit {
+		t.Fatal("the redirect target received the refresh token")
+	}
+}

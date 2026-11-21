@@ -83,7 +83,11 @@ func exchangeRefreshToken(ctx context.Context, refreshToken string) (*tokenRespo
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	// A redirect would resend the refresh token to another host.
+	client := &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token endpoint unreachable: %w", err)
 	}
