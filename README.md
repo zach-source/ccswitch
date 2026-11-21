@@ -73,6 +73,28 @@ Codex CLI:
   ccswitch codex usage [--json]       Show rate-limit usage for each profile
   ccswitch codex autoswitch --once    Switch the live login when it is near its limit
 
+Grok Build CLI:
+  ccswitch grok add <label>           Capture the current Grok login as a profile
+  ccswitch grok use <label>           Make a captured profile the live login
+  ccswitch grok list                  List captured Grok profiles
+  ccswitch grok current               Show the live Grok login
+  ccswitch grok remove <label>        Forget a profile (the live login is untouched)
+  ccswitch grok login <email>         Sign in an x.ai account and save it
+  ccswitch grok priority [label...]   Show or set the autoswitch order
+  ccswitch grok usage [--json]        Show the weekly credit use of each profile
+  ccswitch grok autoswitch --once     Switch the live login when it is near its limit
+
+Antigravity CLI (alias: ccswitch agy ...):
+  ccswitch antigravity add <label>         Capture the current agy login as a profile
+  ccswitch antigravity use <label>         Make a captured profile the live login
+  ccswitch antigravity list                List captured agy profiles
+  ccswitch antigravity current             Show the live agy login
+  ccswitch antigravity remove <label>      Forget a profile (the live login is untouched)
+  ccswitch antigravity login <email>       Sign in a Google account in agy and save it
+  ccswitch antigravity priority [label...] Show or set the autoswitch order
+  ccswitch antigravity usage [--json]      Show the usage windows of each profile
+  ccswitch antigravity autoswitch --once   Switch the live login when it is near its limit
+
 Long-lived tokens:
   ccswitch token create <email|N>     Sign in and save a long-lived token (about 1 year)
   ccswitch token get <email|N>        Print the token, for CLAUDE_CODE_OAUTH_TOKEN
@@ -186,6 +208,51 @@ A `promax` profile always comes before a `pro` profile. The priority order
 applies between profiles with the same plan.
 Codex reads its login at session start, so a switch applies to the next
 session. Run it from a Codex `SessionStart` hook.
+
+### Grok Build CLI Accounts
+Grok keeps one login at a time in `$GROK_HOME/auth.json` (default `~/.grok`).
+`ccswitch grok` captures that file into a named profile in the same backend as
+your Claude accounts, and restores it on demand. A switch saves the login it
+replaces first.
+
+`ccswitch grok login <email>` runs `grok login --device-auth` in a temporary
+`GROK_HOME`, so the live login does not change. It prints the one-time code and
+opens the sign-in page in the Chrome profile that is signed in to `<email>`. It
+saves the login only when the signed-in email is `<email>`.
+
+`ccswitch grok usage` reads the weekly credit use, in percent, from
+`https://cli-chat-proxy.grok.com/v1/billing` for each profile at the same time.
+
+Grok rotates its refresh tokens. When `refresh-all` runs, ccswitch renews the
+stored profiles that are near expiry. It never renews the live login: Grok
+renews that login itself, and a second renewal would spend the refresh token
+twice. If two profiles have the email of the live login, ccswitch cannot tell
+which one is live, so it renews neither.
+
+Grok uses `XAI_API_KEY` instead of the saved login. When `XAI_API_KEY` is set,
+`ccswitch grok` prints a warning, because a switch has no effect until you unset it.
+
+### Antigravity CLI Accounts
+agy keeps one login at a time in a macOS keychain item (service `gemini`,
+account `antigravity`). `ccswitch antigravity` (alias `ccswitch agy`) captures
+that login into a named profile in the same backend as your Claude accounts,
+and restores it on demand. A switch saves the login it replaces first.
+
+`ccswitch antigravity login <email>` runs agy in an isolated `HOME` with its own
+temporary keychain, so the live login does not change. Sign in in agy, then
+exit agy (Ctrl-C or `/exit`). ccswitch saves the login only when the account is
+`<email>`. If a signal ends the command, ccswitch removes the temporary home
+and keychain.
+
+`ccswitch antigravity usage` runs `agy -p /usage` for each profile in an
+isolated `HOME` that holds a copy of that login. It shows the Gemini and the
+Claude/GPT windows: weekly and 5 h. The live login is not touched.
+
+agy renews the access token itself during a usage run. When `refresh-all` runs,
+or `usage` finds an expired access token, ccswitch renews a stored profile with
+one isolated `agy -p /usage` run and saves the new login. Google refresh tokens
+do not rotate, so this is safe. ccswitch never renews the live login. If two
+profiles have the email of the live login, ccswitch renews neither.
 
 ### Tokens for scripts and CI
 Scripts and CI cannot use a browser login. `ccswitch token create <email|N>`
