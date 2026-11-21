@@ -223,9 +223,3 @@ func Expiry(blob []byte) (time.Time, bool) {
 // later, so the copy that expires later is the newer one. create_time is the
 // sign-in time and is not known to change on a refresh.
 func LastRefresh(blob []byte) (time.Time, bool) { return Expiry(blob) }
-
-// HasRefreshToken tells whether the login holds a refresh token.
-func HasRefreshToken(blob []byte) bool {
-	s, err := parseSession(blob)
-	return err == nil && s.get("refresh_token") != ""
-}

@@ -111,9 +111,6 @@ func (b *Backend) Write(_ context.Context, key string, data []byte) error {
 // securityBin is the Apple platform tool every keychain call goes through.
 const securityBin = "/usr/bin/security"
 
-// runSecurityInteractive feeds one command line to `security -i`.
-func runSecurityInteractive(line string) error { return runSecurity(securityBin, nil, line) }
-
 // Delete removes the keychain item for key via /usr/bin/security. Returns nil
 // if no item exists (idempotent).
 func (b *Backend) Delete(_ context.Context, key string) error {

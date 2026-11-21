@@ -8,6 +8,9 @@ import (
 	"testing"
 )
 
+// runSecurityInteractive feeds one command line to `security -i`.
+func runSecurityInteractive(line string) error { return runSecurity(securityBin, nil, line) }
+
 // security -i exits 0 even when the command fails; the error must still surface.
 func TestRunSecurityInteractive_ReportsFailure(t *testing.T) {
 	if err := runSecurityInteractive("not-a-security-command\n"); err == nil {
