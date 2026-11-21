@@ -94,7 +94,7 @@ func TestCodexUsage_RenewsExpiredNonLiveProfileAndSkipsLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rows []codexUsageRowJSON
+	var rows []usageRowJSON
 	if err := json.Unmarshal([]byte(out), &rows); err != nil {
 		t.Fatalf("not JSON: %v\n%s", err, out)
 	}
@@ -162,9 +162,9 @@ func TestCodexUse_WaitsForTheAutoswitchLock(t *testing.T) {
 	}
 	seedUsageProfiles(t, home, blobs, []string{"a", "b"})
 	newCodexHome(t, blobs["a"])
-	old := codexUseLockWait
-	codexUseLockWait = 100 * time.Millisecond
-	t.Cleanup(func() { codexUseLockWait = old })
+	old := useLockWait
+	useLockWait = 100 * time.Millisecond
+	t.Cleanup(func() { useLockWait = old })
 
 	unlock, locked, err := lockFile("codex-autoswitch.lock")
 	if err != nil || !locked {

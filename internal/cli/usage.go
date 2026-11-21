@@ -19,6 +19,7 @@ import (
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/config"
 	"github.com/zach-source/ccswitch/internal/credentials"
+	"github.com/zach-source/ccswitch/internal/provider"
 	"github.com/zach-source/ccswitch/internal/refresh"
 )
 
@@ -321,17 +322,30 @@ func newUsageAllCmd() *cobra.Command {
 			results := collectUsage(cmd.Context(), b, local, seq, cfg.Refresh.ExpiryBuffer, !jsonOut)
 
 			now := time.Now()
-			codexRows, codexErr := loadCodexUsage(cmd.Context(), now)
+			type section struct {
+				p    provider.Provider
+				rows []usageRow
+				err  error
+			}
+			var sections []section
+			for _, ps := range providerSpecs {
+				rows, err := loadUsage(cmd.Context(), ps, now)
+				sections = append(sections, section{ps.New(), rows, err})
+			}
 			if jsonOut {
 				out := map[string]any{"accounts": results}
-				if codexErr == nil && len(codexRows) > 0 {
-					out["codex"] = codexUsageJSON(codexRows)
+				for _, sec := range sections {
+					if sec.err == nil && len(sec.rows) > 0 {
+						out[sec.p.Name()] = usageRowsJSON(sec.rows)
+					}
 				}
 				return json.NewEncoder(os.Stdout).Encode(out)
 			}
 			fmt.Println()
 			renderUsageAll(results)
-			writeCodexSection(os.Stdout, codexRows, codexErr, now)
+			for _, sec := range sections {
+				writeUsageSection(os.Stdout, sec.p, sec.rows, sec.err, now)
+			}
 			return nil
 		},
 	}

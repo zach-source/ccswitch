@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/zach-source/ccswitch/internal/provider"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -179,14 +180,14 @@ func stripANSI(s string) string { return ansiRE.ReplaceAllString(s, "") }
 
 func TestCodexUsage_TextSample(t *testing.T) {
 	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
-	rows := []codexUsageRow{
-		{Label: "work", Plan: "promax", Live: true, Status: usageOK, Windows: []codex.Window{
+	rows := []usageRow{
+		{Label: "work", Plan: "promax", Live: true, Status: usageOK, Windows: []provider.Window{
 			{Seconds: 18000, UsedPercent: 0},
 			{Seconds: 604800, UsedPercent: 96, ResetAt: now.Add(22*time.Hour + 21*time.Minute)}}},
 		{Label: "key", Status: usageAPIKey},
 	}
 	var buf bytes.Buffer
-	if err := writeCodexUsageText(&buf, rows, now); err != nil {
+	if err := writeUsageText(&buf, codexProvider(), rows, now); err != nil {
 		t.Fatal(err)
 	}
 	want := "Codex Accounts - Usage\n\n" +

@@ -16,9 +16,9 @@ import (
 	"github.com/zach-source/ccswitch/internal/provider"
 )
 
-// codexTokenRenewBefore is how long before the access token expires that
-// ccswitch renews a Codex token session.
-const codexTokenRenewBefore = 24 * time.Hour
+// tokenRenewBefore is how long before the access token expires that
+// ccswitch renews a stored login.
+const tokenRenewBefore = 24 * time.Hour
 
 // codexTokenLockWait is how long a command waits for the session lock.
 const codexTokenLockWait = 30 * time.Second
@@ -43,19 +43,10 @@ func lockFileWait(name string, wait time.Duration) (func(), error) {
 	}
 }
 
-// codexTokenLocal returns the local backend, or nil when it is not available.
-func codexTokenLocal() backend.Backend {
-	local, err := codexLocalBackend()
-	if err != nil {
-		return nil
-	}
-	return local
-}
-
-// saveCodexBlob writes the credential to the store. If that fails, it writes
+// saveBlob writes the credential to the store. If that fails, it writes
 // the local copy and warns. If both fail, it warns that the credential is
 // lost. what names the credential. again is the command that signs in again.
-func saveCodexBlob(ctx context.Context, store, local backend.Backend, key, what, again string, blob []byte) {
+func saveBlob(ctx context.Context, store, local backend.Backend, key, what, again string, blob []byte) {
 	storeErr := store.Write(ctx, key, blob)
 	if storeErr == nil {
 		return
@@ -70,8 +61,8 @@ func saveCodexBlob(ctx context.Context, store, local backend.Backend, key, what,
 		"The old refresh token is now spent: run `%s` again.\n", what, storeErr, again)
 }
 
-// codexRenewTarget names one stored Codex credential for renewCodexBlob.
-type codexRenewTarget struct {
+// renewTarget names one stored credential for renewBlob.
+type renewTarget struct {
 	lock        string // lock file name
 	key         string // backend key
 	what        string // text for messages
@@ -79,27 +70,31 @@ type codexRenewTarget struct {
 	skipUnknown bool   // skip a credential with no readable expiry
 }
 
-// renewCodexBlob returns the credential of the target. It renews the tokens
-// first when the access token has less than codexTokenRenewBefore left.
+// renewBlob returns the credential of the target. It renews the tokens
+// first when the access token has less than tokenRenewBefore left.
+// A provider that cannot refresh keeps its credential.
 // renewed tells whether it did. It holds the target lock, so two processes
 // never spend the same refresh token. A missing credential returns
 // backend.ErrNotFound.
-func renewCodexBlob(ctx context.Context, store, local backend.Backend, tgt codexRenewTarget) (blob []byte, renewed bool, err error) {
+func renewBlob(ctx context.Context, p provider.Provider, store, local backend.Backend, tgt renewTarget) (blob []byte, renewed bool, err error) {
 	unlock, err := lockFileWait(tgt.lock, codexTokenLockWait)
 	if err != nil {
 		return nil, false, err
 	}
 	defer unlock()
 
-	blob, err = codexFresher(ctx, store, local, tgt.key)
+	blob, err = fresher(ctx, p, store, local, tgt.key)
 	if err != nil {
 		return nil, false, err
 	}
-	exp, ok := codexProvider().Expiry(blob)
-	if (ok && time.Until(exp) >= codexTokenRenewBefore) || (!ok && tgt.skipUnknown) {
+	exp, ok := p.Expiry(blob)
+	if (ok && time.Until(exp) >= tokenRenewBefore) || (!ok && tgt.skipUnknown) {
 		return blob, false, nil
 	}
-	fresh, err := codexProvider().Refresh(ctx, blob)
+	fresh, err := p.Refresh(ctx, blob)
+	if errors.Is(err, provider.ErrNotSupported) {
+		return blob, false, nil
+	}
 	if err != nil {
 		// A temporary failure leaves the refresh token unspent. Keep the
 		// current access token while it has more than an hour left.
@@ -110,15 +105,15 @@ func renewCodexBlob(ctx context.Context, store, local backend.Backend, tgt codex
 		}
 		return nil, false, err
 	}
-	saveCodexBlob(ctx, store, local, tgt.key, tgt.what, tgt.again, fresh)
+	saveBlob(ctx, store, local, tgt.key, tgt.what, tgt.again, fresh)
 	return fresh, true, nil
 }
 
 // renewCodexTokenSession returns the session of email. It renews the tokens
-// first when the access token has less than codexTokenRenewBefore left.
+// first when the access token has less than tokenRenewBefore left.
 // renewed tells whether it did. A missing session returns backend.ErrNotFound.
 func renewCodexTokenSession(ctx context.Context, store, local backend.Backend, email string) (blob []byte, renewed bool, err error) {
-	return renewCodexBlob(ctx, store, local, codexRenewTarget{
+	return renewBlob(ctx, codexProvider(), store, local, renewTarget{
 		lock:  "codex-token-" + strings.ReplaceAll(strings.ToLower(email), "/", "_") + ".lock",
 		key:   codexTokenKey(email),
 		what:  "Codex token session for " + email,
@@ -182,7 +177,7 @@ func codexTokenCreate(cmd *cobra.Command, email string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := codexProvider().Login(cmd.Context(), func(d provider.LoginPrompt) { announceCodexLogin(email, d, false) })
+	blob, err := codexProvider().Login(cmd.Context(), func(d provider.LoginPrompt) { announceLogin(codexProvider(), email, d, false) })
 	if err != nil {
 		return err
 	}
@@ -205,7 +200,7 @@ func codexTokenGet(cmd *cobra.Command, email, home string) error {
 	if err != nil {
 		return err
 	}
-	blob, _, err := renewCodexTokenSession(cmd.Context(), store, codexTokenLocal(), email)
+	blob, _, err := renewCodexTokenSession(cmd.Context(), store, localOrNil(), email)
 	switch {
 	case errors.Is(err, backend.ErrNotFound):
 		return fmt.Errorf("no token session for %s (run `ccswitch token create --codex %s`)", email, email)
@@ -250,9 +245,9 @@ func codexTokenRemove(cmd *cobra.Command, email string) error {
 	if err != nil {
 		return err
 	}
-	local := codexTokenLocal()
+	local := localOrNil()
 	ctx := cmd.Context()
-	if blob, err := codexFresher(ctx, store, local, codexTokenKey(email)); err != nil {
+	if blob, err := fresher(ctx, codexProvider(), store, local, codexTokenKey(email)); err != nil {
 		if errors.Is(err, backend.ErrNotFound) {
 			return fmt.Errorf("no token session for %s", email)
 		}
@@ -279,9 +274,9 @@ func printCodexTokens(ctx context.Context, store backend.Backend) bool {
 	if err != nil {
 		return false
 	}
-	local, found := codexTokenLocal(), false
+	local, found := localOrNil(), false
 	for _, email := range emails {
-		blob, err := codexFresher(ctx, store, local, codexTokenKey(email))
+		blob, err := fresher(ctx, codexProvider(), store, local, codexTokenKey(email))
 		if err != nil {
 			continue
 		}

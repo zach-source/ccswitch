@@ -33,6 +33,9 @@ type Identity struct {
 	Email     string
 	Plan      string
 	AccountID string
+	// Static is true for a login that never expires or rotates, such as an
+	// API key. It has nothing to renew, snapshot or query.
+	Static bool
 }
 
 // Window is one rate-limit window: how much of it the account has used and
@@ -86,31 +89,39 @@ type LoginPrompt struct {
 	Browser bool   // the CLI opened the default browser itself
 }
 
-// Provider is one CLI whose login ccswitch swaps.
+// Provider is one CLI whose login ccswitch swaps. Every method treats the
+// login as opaque bytes. A method that does not apply returns ErrNotSupported.
 type Provider interface {
-	Name() string          // "codex", "grok", "antigravity"
+	Name() string          // "codex", "grok", "antigravity"; also the lock file prefix
 	CredKeyPrefix() string // backend key prefix, for example "Codex-Account-"
 	RegistryPath() string
+	LiveLocation() string // where the live login sits, for user-facing text
 
 	// ReadLive returns the live login, or ErrNoLiveLogin when it is empty.
 	ReadLive() ([]byte, error)
 	WriteLive([]byte) error
 
 	Describe([]byte) Identity
-	// Same tells whether two logins belong to the same account.
-	Same(a, b []byte) bool
+	// Match names the profile the live login belongs to. Anything other than
+	// exactly one candidate is no match. It does not read stored logins.
+	Match(reg *Registry, live []byte) (label string, ok bool)
 	// Expiry returns when the access token expires, when it is readable.
 	Expiry([]byte) (time.Time, bool)
+	// LastRefresh returns when the login was last renewed, when it is
+	// readable. The newer of two copies of one profile wins.
+	LastRefresh([]byte) (time.Time, bool)
 
 	// Refresh renews the login. It may return ErrNotSupported or
-	// ErrSessionEnded.
+	// ErrSessionEnded. ccswitch never renews the live login: its CLI does that
+	// itself, and a refresh may spend the old refresh token.
 	Refresh(ctx context.Context, blob []byte) ([]byte, error)
-	// RotatesRefreshToken tells whether a refresh spends the old refresh
-	// token. If so, never renew the live login: its CLI does that itself.
-	RotatesRefreshToken() bool
+	// Revoke ends the session of the login on the server. It does nothing for
+	// a login with no refresh token. It may return ErrNotSupported.
+	Revoke(ctx context.Context, blob []byte) error
 
-	// FetchUsage may return ErrUsageRejected or ErrNotSupported.
-	FetchUsage(ctx context.Context, blob []byte) (Usage, error)
+	// FetchUsage may return ErrUsageRejected or ErrNotSupported. The bytes are
+	// non-nil when the call renewed the login; the caller must save them.
+	FetchUsage(ctx context.Context, blob []byte) (Usage, []byte, error)
 	// Login signs in a new account without touching the live login and
 	// returns its login bytes. onReady runs once the prompt is known. It may
 	// return ErrNotSupported.

@@ -26,10 +26,10 @@ func autoLocalBackend() backend.Type {
 	return backend.TypeFile
 }
 
-// codexLocalBackend returns the backend for local Codex copies: always the
-// file backend, at 0600 under the backup dir. A Codex auth.json is about
+// providerLocalBackend returns the backend for local provider copies: always
+// the file backend, at 0600 under the backup dir. A Codex auth.json is about
 // 4.5 KB, and the keychain backend cannot write a value over about 2 KB.
 // Codex itself keeps the same login as a plain 0600 file.
-func codexLocalBackend() (backend.Backend, error) {
+func providerLocalBackend() (backend.Backend, error) {
 	return resolveBackend(&config.Config{Backend: backend.TypeFile})
 }

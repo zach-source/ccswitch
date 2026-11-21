@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
+	"slices"
 
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/account"
@@ -80,25 +80,14 @@ func newRefreshAllCmd() *cobra.Command {
 			// error so the process exits non-zero for cron/launchd wrappers.
 			fmt.Printf("refresh-all: %d account(s) refreshed.\n", n)
 			// Codex token sessions renew in the same pass.
-			renewed, cerr := renewCodexSessions(ctx, b, codexTokenLocal(), cliLogger(quiet))
+			renewed, cerr := renewCodexSessions(ctx, b, localOrNil(), cliLogger(quiet))
 			if renewed > 0 {
 				fmt.Printf("refresh-all: %d Codex token session(s) renewed.\n", renewed)
 			}
-			// Stored Codex profiles renew too. Save the live login first, so
-			// the copy is not older than the file Codex keeps up to date.
-			// The switch lock keeps a switch from reading a profile while its
-			// refresh token rotates.
+			// Stored profiles of every provider renew too.
 			var perr error
-			if unlock, lerr := lockFileWait("codex-autoswitch.lock", 30*time.Second); lerr != nil {
-				fmt.Fprintf(os.Stderr, "Warning: skipped the Codex profiles: %v\n", lerr)
-			} else {
-				syncLiveCodex(ctx, b, codexTokenLocal())
-				var pn int
-				pn, perr = renewCodexProfiles(ctx, b, codexTokenLocal(), cliLogger(quiet))
-				unlock()
-				if pn > 0 {
-					fmt.Printf("refresh-all: %d Codex profile(s) renewed.\n", pn)
-				}
+			for _, ps := range providerSpecs {
+				perr = errors.Join(perr, refreshProfiles(ctx, ps.New(), b, cliLogger(quiet)))
 			}
 			return errors.Join(err, cerr, perr)
 		},
@@ -127,30 +116,34 @@ func newLoginCmd() *cobra.Command {
 			"     its success page shows (a separate command, possibly a separate\n" +
 			"     terminal or process entirely).\n" +
 			"--manual always targets exactly one account, so pair it with --only.\n\n" +
-			"After the Claude accounts, login signs in again every Codex profile whose login\n" +
-			"is stale or expired. --force takes every Codex profile that is not an API key.\n" +
-			"--only also matches a Codex label or email. --provider runs one pass only.",
+			"After the Claude accounts, login signs in again every " + providerTitles() + " profile whose login\n" +
+			"is stale or expired. --force takes every " + providerTitles() + " profile that is not an API key.\n" +
+			"--only also matches a " + providerTitles() + " label or email. --provider runs one pass only.",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if code != "" && !manual {
 				return fmt.Errorf("--code requires --manual")
 			}
-			switch provider {
-			case providerAll, providerClaude, providerCodex:
-			default:
-				return fmt.Errorf("--provider must be all, claude or codex, not %q", provider)
+			if !slices.Contains(providerNames(), provider) {
+				return fmt.Errorf("--provider must be %s, not %q", orList(providerNames()), provider)
 			}
-			runClaude, runCodex := provider != providerCodex, provider != providerClaude
+			runClaude := provider == providerAll || provider == providerClaude
+			var run []providerSpec
+			for _, s := range providerSpecs {
+				if provider == providerAll || provider == s.New().Name() {
+					run = append(run, s)
+				}
+			}
 			if only != "" {
 				seq, err := account.LoadSequence(sequencePath())
 				if err != nil {
 					return err
 				}
 				onClaude := runClaude && seq.Resolve(only) != ""
-				onCodex := runCodex && codexProfileMatches(only)
-				if !onClaude && !onCodex {
+				run = slices.DeleteFunc(run, func(s providerSpec) bool { return !profileMatches(s.New(), only) })
+				if !onClaude && len(run) == 0 {
 					return loginNoMatch(provider, only)
 				}
-				runClaude, runCodex = onClaude, onCodex
+				runClaude = onClaude
 			}
 			if code != "" && !runClaude {
 				return fmt.Errorf("--code applies to Claude accounts only")
@@ -162,16 +155,20 @@ func newLoginCmd() *cobra.Command {
 					return claudeErr
 				}
 			}
-			if runCodex {
-				return errors.Join(claudeErr, loginCodex(cmd.Context(), only, force, manual))
+			if len(run) == 0 {
+				return claudeErr
 			}
-			return claudeErr
+			errs := claudeErr
+			for _, s := range run {
+				errs = errors.Join(errs, loginProvider(cmd.Context(), s, only, force, manual))
+			}
+			return errs
 		},
 	}
 	cmd.Flags().StringVar(&only, "only", "", "Log in to a single account (hash|email|index)")
 	cmd.Flags().BoolVar(&force, "force", false, "Re-login every selected account even if its credentials are valid")
 	cmd.Flags().BoolVar(&manual, "manual", false, "Log in without opening a local browser: print the URL and wait for a pasted response")
-	cmd.Flags().StringVar(&provider, "provider", providerAll, "Which logins to renew: all, claude or codex")
+	cmd.Flags().StringVar(&provider, "provider", providerAll, "Which logins to renew: "+orList(providerNames()))
 	cmd.Flags().StringVar(&code, "code", "", "Supply the pasted response non-interactively (requires --manual)")
 	return cmd
 }

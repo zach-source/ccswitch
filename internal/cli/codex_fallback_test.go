@@ -122,7 +122,7 @@ func TestCodexFresher(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := codexFresher(ctx, seed(tt.store), seed(tt.local), key)
+			got, err := fresher(ctx, codexProvider(), seed(tt.store), seed(tt.local), key)
 			if tt.want == nil {
 				if !errors.Is(err, backend.ErrNotFound) {
 					t.Fatalf("err = %v, want the store's error", err)
@@ -137,7 +137,7 @@ func TestCodexFresher(t *testing.T) {
 
 	t.Run("same object", func(t *testing.T) {
 		b := seed(older)
-		got, err := codexFresher(ctx, b, b, key)
+		got, err := fresher(ctx, codexProvider(), b, b, key)
 		if err != nil || !bytes.Equal(got, older) {
 			t.Errorf("got %s, %v", got, err)
 		}

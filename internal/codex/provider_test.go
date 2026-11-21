@@ -29,19 +29,20 @@ func TestSentinelsMatchProviderErrors(t *testing.T) {
 	}
 }
 
-func TestProviderSame(t *testing.T) {
-	mk := func(account, email string) []byte {
-		return []byte(`{"auth_mode":"apikey","tokens":{"account_id":"` + account + `"}}`)
+func TestProviderMatch(t *testing.T) {
+	mk := func(account string) []byte {
+		return []byte(`{"auth_mode":"chatgpt","tokens":{"account_id":"` + account + `"}}`)
 	}
+	reg := &provider.Registry{Profiles: map[string]provider.Profile{"work": {Label: "work", AccountID: "a"}}}
 	p := Provider{}
-	if !p.Same(mk("a", ""), mk("a", "")) {
-		t.Error("equal account IDs should match")
+	if label, ok := p.Match(reg, mk("a")); !ok || label != "work" {
+		t.Errorf("equal account IDs should match, got %q %v", label, ok)
 	}
-	if p.Same(mk("a", ""), mk("b", "")) {
+	if _, ok := p.Match(reg, mk("b")); ok {
 		t.Error("different account IDs should not match")
 	}
-	if p.Same(mk("", ""), mk("", "")) {
-		t.Error("empty account IDs should never match")
+	if _, ok := p.Match(reg, mk("")); ok {
+		t.Error("an empty account ID should never match")
 	}
 }
 
@@ -49,8 +50,5 @@ func TestProviderBasics(t *testing.T) {
 	p := Provider{RegistryFile: "/x/codex.json"}
 	if p.Name() != "codex" || p.CredKeyPrefix() != "Codex-Account-" || p.RegistryPath() != "/x/codex.json" {
 		t.Fatalf("unexpected basics: %s %s %s", p.Name(), p.CredKeyPrefix(), p.RegistryPath())
-	}
-	if !p.RotatesRefreshToken() {
-		t.Error("Codex rotates refresh tokens")
 	}
 }

@@ -3,7 +3,6 @@ package codex
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/provider"
@@ -44,34 +43,49 @@ func (p Provider) RegistryPath() string { return p.RegistryFile }
 func (Provider) ReadLive() ([]byte, error) { return ReadLive() }
 func (Provider) WriteLive(b []byte) error  { return WriteLive(b) }
 
-func (Provider) Describe(b []byte) provider.Identity { return Describe(b) }
+// Describe marks an API-key login as static: it has nothing to renew.
+func (Provider) Describe(b []byte) provider.Identity {
+	id := Describe(b)
+	id.Static = id.Mode == "apikey"
+	return id
+}
 
-// Same applies the MatchProfile rule to two logins: the account IDs must be
-// equal, and two emails, when both are present, must agree.
-func (Provider) Same(a, b []byte) bool {
-	x, y := Describe(a), Describe(b)
-	if x.AccountID == "" || x.AccountID != y.AccountID {
-		return false
-	}
-	return x.Email == "" || y.Email == "" || strings.EqualFold(x.Email, y.Email)
+func (Provider) LiveLocation() string { return AuthPath() }
+
+// Match applies the MatchProfile rule: the account ID, and the email when
+// both sides carry one.
+func (Provider) Match(reg *provider.Registry, live []byte) (string, bool) {
+	return MatchProfile(reg, live)
 }
 
 func (Provider) Expiry(b []byte) (time.Time, bool) { return AccessTokenExpiry(b) }
 
 func (Provider) Refresh(ctx context.Context, b []byte) ([]byte, error) { return Refresh(ctx, b) }
 
-// RotatesRefreshToken is true: Codex refresh tokens are single use.
-func (Provider) RotatesRefreshToken() bool { return true }
+func (Provider) LastRefresh(b []byte) (time.Time, bool) { return LastRefresh(b) }
 
-// FetchUsage reads the access token and account ID from the login.
-func (Provider) FetchUsage(ctx context.Context, blob []byte) (provider.Usage, error) {
+// Revoke does nothing for an API key or a login with no refresh token.
+func (Provider) Revoke(ctx context.Context, b []byte) error {
+	if Describe(b).Mode == "apikey" || !HasRefreshToken(b) {
+		return nil
+	}
+	return Revoke(ctx, b)
+}
+
+// FetchUsage reads the access token and account ID from the login. An API key
+// has no usage.
+func (Provider) FetchUsage(ctx context.Context, blob []byte) (provider.Usage, []byte, error) {
+	if Describe(blob).Mode == "apikey" {
+		return provider.Usage{}, nil, provider.ErrNotSupported
+	}
 	var t struct {
 		Tokens struct {
 			AccessToken string `json:"access_token"`
 		} `json:"tokens"`
 	}
 	_ = json.Unmarshal(blob, &t)
-	return FetchUsage(ctx, t.Tokens.AccessToken, Describe(blob).AccountID)
+	u, err := FetchUsage(ctx, t.Tokens.AccessToken, Describe(blob).AccountID)
+	return u, nil, err
 }
 
 func (p Provider) Login(ctx context.Context, onReady func(provider.LoginPrompt)) ([]byte, error) {
