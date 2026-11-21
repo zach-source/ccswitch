@@ -107,6 +107,9 @@ func collectProviderUsage(ctx context.Context, p provider.Provider, reg *provide
 	if len(live) == 0 {
 		liveLabel = ""
 	}
+	// With no single match, any profile with the live email could be live.
+	// Show it from its stored copy, but never renew it.
+	noRenew := liveCandidates(p, reg, live)
 	labels := reg.Ordered()
 	rows := make([]usageRow, len(labels))
 	var wg sync.WaitGroup
@@ -118,7 +121,7 @@ func collectProviderUsage(ctx context.Context, p provider.Provider, reg *provide
 			var readErr error
 			if label != liveLabel {
 				blob, readErr = fresher(ctx, p, store, local, p.CredKeyPrefix()+label)
-				if renew {
+				if renew && !noRenew[label] {
 					blob = renewStale(ctx, p, store, local, label, blob, readErr, now)
 				}
 			}

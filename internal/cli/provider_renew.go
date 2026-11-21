@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/backend"
@@ -36,17 +37,17 @@ func renewProfiles(ctx context.Context, p provider.Provider, store, local backen
 		return 0, err
 	}
 	// An unreadable live login could be any profile, so renew none.
-	liveLabel := ""
+	var liveLabels map[string]bool
 	live, err := p.ReadLive()
 	switch {
 	case err == nil:
-		liveLabel, _ = p.Match(reg, live)
+		liveLabels = liveCandidates(p, reg, live)
 	case !errors.Is(err, provider.ErrNoLiveLogin):
 		return 0, fmt.Errorf("read the live %s login: %w", title(p), err)
 	}
 	renewed, failed := 0, 0
 	for _, label := range reg.Ordered() {
-		if label == liveLabel {
+		if liveLabels[label] {
 			continue
 		}
 		_, did, err := renewProfile(ctx, p, store, local, label)
@@ -119,4 +120,29 @@ func syncLive(ctx context.Context, p provider.Provider, store, local backend.Bac
 			fmt.Fprintf(os.Stderr, "Warning: could not save the %s registry: %v\n", title(p), err)
 		}
 	}
+}
+
+// liveCandidates returns the profiles that can hold the live login. It is the
+// matching profile. When Match finds none, because two profiles share the
+// email, it is every profile with the email of the live login: any of them
+// could be live, and a renewal can rotate the live refresh token. It uses the
+// emails in the registry and reads no stored login.
+func liveCandidates(p provider.Provider, reg *provider.Registry, live []byte) map[string]bool {
+	if len(live) == 0 {
+		return nil
+	}
+	if label, ok := p.Match(reg, live); ok {
+		return map[string]bool{label: true}
+	}
+	email := p.Describe(live).Email
+	if email == "" {
+		return nil
+	}
+	out := map[string]bool{}
+	for label, pr := range reg.Profiles {
+		if strings.EqualFold(pr.Email, email) {
+			out[label] = true
+		}
+	}
+	return out
 }
