@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/zach-source/ccswitch/internal/provider"
 )
 
 const (
@@ -38,7 +40,7 @@ const (
 )
 
 // ErrNoLiveLogin reports that CODEX_HOME holds no auth.json to capture.
-var ErrNoLiveLogin = errors.New("no Codex login found")
+var ErrNoLiveLogin error = &kindError{"no Codex login found", provider.ErrNoLiveLogin}
 
 // Home returns Codex's root directory: $CODEX_HOME when set, else ~/.codex.
 func Home() string {
@@ -132,15 +134,6 @@ func IsFileBacked() (bool, string) {
 		return store != "keyring", store
 	}
 	return true, ""
-}
-
-// Identity is the human-facing description of a Codex credential, used for
-// list output and for confirming that a capture grabbed the account meant.
-type Identity struct {
-	Mode      string // "chatgpt", "apikey", or "" when absent
-	Email     string
-	Plan      string
-	AccountID string
 }
 
 // Describe decodes as much of a credential blob as is worth showing. Every

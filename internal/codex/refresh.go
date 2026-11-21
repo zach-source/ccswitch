@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zach-source/ccswitch/internal/provider"
 	"github.com/zach-source/ccswitch/internal/refresh"
 )
 
@@ -24,7 +25,7 @@ const (
 
 // ErrSessionEnded means the server will never accept this refresh token
 // again. The session must be created again.
-var ErrSessionEnded = errors.New("the session has ended")
+var ErrSessionEnded error = &kindError{"the session has ended", provider.ErrSessionEnded}
 
 var httpClient = &http.Client{Timeout: 10 * time.Second}
 

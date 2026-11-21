@@ -7,8 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 	"time"
+
+	"github.com/zach-source/ccswitch/internal/provider"
 )
 
 // defaultUsageURL is the endpoint the ChatGPT web app and Codex CLI use to
@@ -20,48 +21,7 @@ const defaultUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 // ErrUsageRejected means the server refused the access token (HTTP 401 or
 // 403). The user must sign in again; a retry cannot help. Every other
 // failure is a plain error, because the account may be fine.
-var ErrUsageRejected = errors.New("codex: usage request rejected, sign in again")
-
-// Window is one rate-limit window: how much of it the account has used and
-// when it resets.
-type Window struct {
-	Seconds     int       // window length
-	UsedPercent float64   // 0-100; the server may send an integer or a float
-	ResetAt     time.Time // zero when the server omits it
-}
-
-// Name gives the short label for the window length: "5h", "weekly", or the
-// length in hours or minutes for any other size.
-func (w Window) Name() string {
-	switch {
-	case w.Seconds == 18000:
-		return "5h"
-	case w.Seconds == 604800:
-		return "weekly"
-	case w.Seconds < 3600:
-		return strconv.Itoa(w.Seconds/60) + "m"
-	}
-	return strconv.Itoa(w.Seconds/3600) + "h"
-}
-
-// Usage is the rate-limit state of one account. Free and Pro plans can have
-// one window only, so Windows holds 0, 1 or 2 entries (null windows skipped).
-type Usage struct {
-	Plan    string
-	Windows []Window
-}
-
-// Load is the highest UsedPercent across the windows, or 0 with no windows.
-// The switcher uses it to rank accounts: the fullest window limits the account.
-func (u Usage) Load() float64 {
-	var max float64
-	for _, w := range u.Windows {
-		if w.UsedPercent > max {
-			max = w.UsedPercent
-		}
-	}
-	return max
-}
+var ErrUsageRejected error = &kindError{"codex: usage request rejected, sign in again", provider.ErrUsageRejected}
 
 // usageWindow is the wire form of a window. A pointer in the parent tells
 // null from present.
