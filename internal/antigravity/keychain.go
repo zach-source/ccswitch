@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
 	"github.com/zach-source/ccswitch/internal/provider"
@@ -57,8 +59,14 @@ func security(ctx context.Context, env []string, args ...string) error {
 // keychain, so agy there cannot touch the real login. When blob is not nil it
 // is put into that keychain first. After fn it reads the item back and
 // returns it when it differs from blob: agy signed in or refreshed it. The
-// keychain and the home are always removed.
-func withIsolatedHome(ctx context.Context, blob []byte, fn func(home string) error) (changed []byte, err error) {
+// keychain and the home are always removed, also when a signal ends the run.
+//
+// fn gets a context that a SIGINT, SIGTERM or SIGHUP cancels, so the agy it
+// starts dies and the cleanup below runs. Login starts agy on the terminal,
+// where the user's Ctrl-C belongs to agy, so it uses the caller's context.
+func withIsolatedHome(ctx context.Context, blob []byte, fn func(ctx context.Context, home string) error) (changed []byte, err error) {
+	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer stop()
 	home, err := os.MkdirTemp("", "ccswitch-agy-")
 	if err != nil {
 		return nil, err
@@ -89,7 +97,7 @@ func withIsolatedHome(ctx context.Context, blob []byte, fn func(home string) err
 			return nil, fmt.Errorf("copy the login into the isolated keychain: %w", err)
 		}
 	}
-	fnErr := fn(home)
+	fnErr := fn(ctx, home)
 	after, rerr := readItem(context.Background(), env)
 	if rerr == nil && !bytes.Equal(after, blob) {
 		changed = after

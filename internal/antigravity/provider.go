@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/zach-source/ccswitch/internal/backend/keychain"
@@ -129,8 +130,10 @@ func (Provider) Revoke(context.Context, []byte) error { return provider.ErrNotSu
 func runUsage(ctx context.Context, blob []byte) (out []byte, runErr error, changed []byte, err error) {
 	ctx, cancel := context.WithTimeout(ctx, usageTimeout)
 	defer cancel()
-	changed, err = withIsolatedHome(ctx, blob, func(home string) error {
+	changed, err = withIsolatedHome(ctx, blob, func(ctx context.Context, home string) error {
 		cmd := exec.CommandContext(ctx, agyBin, "-p", "/usage")
+		// Do not wait for a grandchild that keeps the output pipe open.
+		cmd.WaitDelay = 5 * time.Second
 		cmd.Dir = home
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		out, runErr = cmd.Output()
@@ -210,13 +213,15 @@ func shortWindow(w string) (string, int) {
 // keychain, then returns the login agy saved there.
 func (Provider) Login(ctx context.Context, onReady func(provider.LoginPrompt)) ([]byte, error) {
 	var runErr error
-	blob, err := withIsolatedHome(ctx, nil, func(home string) error {
+	blob, err := withIsolatedHome(ctx, nil, func(_ context.Context, home string) error {
 		onReady(provider.LoginPrompt{Message: "agy opens now. Sign in there, then exit agy (Ctrl-C or /exit)."})
-		// Ctrl-C reaches ccswitch too. Ignore it so the cleanup still runs.
+		// Ctrl-C reaches ccswitch too, and so can a terminal hangup or a
+		// kill. Ignore them so agy ends first and the cleanup still runs.
 		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 		defer signal.Stop(sig)
 		cmd := exec.CommandContext(ctx, agyBin)
+		cmd.WaitDelay = 5 * time.Second
 		cmd.Dir, cmd.Env = home, append(os.Environ(), "HOME="+home)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		runErr = cmd.Run()

@@ -5,8 +5,10 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -162,7 +164,7 @@ func TestFetchUsage_NoRowsIsError(t *testing.T) {
 func TestWithIsolatedHome_CleansUpOnError(t *testing.T) {
 	_, logFile := setup(t)
 	var seen string
-	_, err := withIsolatedHome(context.Background(), []byte("X"), func(home string) error {
+	_, err := withIsolatedHome(context.Background(), []byte("X"), func(_ context.Context, home string) error {
 		seen = home
 		return errors.New("boom")
 	})
@@ -269,5 +271,47 @@ func TestRefresh_ReturnsRenewedLoginOrNotSupported(t *testing.T) {
 	t.Setenv("FAKE_NEW", "")
 	if _, err := (Provider{}).Refresh(context.Background(), []byte("STORED")); !errors.Is(err, provider.ErrNotSupported) {
 		t.Fatalf("an unchanged login: err = %v, want ErrNotSupported", err)
+	}
+}
+
+// A SIGTERM during `agy -p /usage` must kill agy and remove the isolated home,
+// which holds a keychain with a refresh token.
+func TestFetchUsage_SIGTERMKillsAgyAndRemovesHome(t *testing.T) {
+	setup(t)
+	started := filepath.Join(t.TempDir(), "started")
+	t.Setenv("FAKE_STARTED", started)
+	slow := "#!/bin/sh\necho \"$HOME\" > \"$FAKE_STARTED\"\nexec sleep 10\n"
+	if err := os.WriteFile(agyBin, []byte(slow), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Keep the test process alive when the signal comes without a handler.
+	absorb := make(chan os.Signal, 1)
+	signal.Notify(absorb, syscall.SIGTERM)
+	defer signal.Stop(absorb)
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := Provider{}.FetchUsage(context.Background(), []byte("STORED"))
+		done <- err
+	}()
+	var home string
+	for range 200 {
+		if b, err := os.ReadFile(started); err == nil && len(b) > 0 {
+			home = strings.TrimSpace(string(b))
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if home == "" {
+		t.Fatal("agy did not start")
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+	select {
+	case <-done:
+	case <-time.After(4 * time.Second):
+		t.Fatal("FetchUsage kept running after SIGTERM")
+	}
+	if _, err := os.Stat(home); !os.IsNotExist(err) {
+		t.Fatalf("isolated home %s still exists", home)
 	}
 }
