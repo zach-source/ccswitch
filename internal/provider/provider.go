@@ -87,6 +87,9 @@ type LoginPrompt struct {
 	URL     string // the verification address
 	Code    string // the one-time code
 	Browser bool   // the CLI opened the default browser itself
+	// Message replaces the address and code when the CLI needs neither, for
+	// example when it signs in on the user's terminal.
+	Message string
 }
 
 // Provider is one CLI whose login ccswitch swaps. Every method treats the
@@ -126,4 +129,11 @@ type Provider interface {
 	// returns its login bytes. onReady runs once the prompt is known. It may
 	// return ErrNotSupported.
 	Login(ctx context.Context, onReady func(LoginPrompt)) ([]byte, error)
+}
+
+// IdentityLogin is an optional capability of a Provider whose login bytes do
+// not name the account. LoginIdentity signs in like Login and also returns who
+// signed in, from another source such as the CLI's log.
+type IdentityLogin interface {
+	LoginIdentity(ctx context.Context, onReady func(LoginPrompt)) ([]byte, Identity, error)
 }

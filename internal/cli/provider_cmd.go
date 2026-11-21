@@ -245,11 +245,18 @@ func newProviderLoginCmd(s providerSpec) *cobra.Command {
 // browser. It checks that the login belongs to email and saves nothing when it
 // does not. It saves reg and returns the new login.
 func signInAndSave(ctx context.Context, p provider.Provider, b backend.Backend, reg *provider.Registry, email, label string, manual bool) ([]byte, error) {
-	blob, err := p.Login(ctx, func(d provider.LoginPrompt) { announceLogin(p, email, d, manual) })
+	onReady := func(d provider.LoginPrompt) { announceLogin(p, email, d, manual) }
+	var blob []byte
+	var id provider.Identity
+	var err error
+	if il, ok := p.(provider.IdentityLogin); ok {
+		blob, id, err = il.LoginIdentity(ctx, onReady)
+	} else if blob, err = p.Login(ctx, onReady); err == nil {
+		id = p.Describe(blob)
+	}
 	if err != nil {
 		return nil, err
 	}
-	id := p.Describe(blob)
 	if !strings.EqualFold(id.Email, email) {
 		who := id.Email
 		if who == "" {
@@ -273,6 +280,10 @@ func signInAndSave(ctx context.Context, p provider.Provider, b backend.Backend, 
 // announceLogin tells the user how to finish the sign-in. It opens the
 // address in the Chrome profile of email when one exists, unless manual is set.
 func announceLogin(p provider.Provider, email string, d provider.LoginPrompt, manual bool) {
+	if d.Message != "" {
+		fmt.Println(d.Message)
+		return
+	}
 	if d.Browser && d.Code == "" {
 		fmt.Printf("%s opened your default browser. Sign in as %s there.\n", title(p), email)
 		return
