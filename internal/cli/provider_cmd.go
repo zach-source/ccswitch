@@ -31,7 +31,7 @@ type providerSpec struct {
 }
 
 // providerSpecs lists every provider. A new provider adds one line here.
-var providerSpecs = []providerSpec{codexSpec, grokSpec}
+var providerSpecs = []providerSpec{codexSpec, grokSpec, antigravitySpec}
 
 func init() {
 	for _, s := range providerSpecs {
@@ -284,6 +284,10 @@ func signInAndSave(ctx context.Context, p provider.Provider, b backend.Backend, 
 // announceLogin tells the user how to finish the sign-in. It opens the
 // address in the Chrome profile of email when one exists, unless manual is set.
 func announceLogin(p provider.Provider, email string, d provider.LoginPrompt, manual bool) {
+	if d.Message != "" {
+		fmt.Println(d.Message)
+		return
+	}
 	if d.Browser && d.Code == "" {
 		fmt.Printf("%s opened your default browser. Sign in as %s there.\n", title(p), email)
 		return

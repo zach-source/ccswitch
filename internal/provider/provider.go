@@ -87,6 +87,9 @@ type LoginPrompt struct {
 	URL     string // the verification address
 	Code    string // the one-time code
 	Browser bool   // the CLI opened the default browser itself
+	// Message replaces the address and code when the CLI needs neither, for
+	// example when it signs in on the user's terminal.
+	Message string
 }
 
 // Provider is one CLI whose login ccswitch swaps. Every method treats the
