@@ -27,10 +27,11 @@ type providerSpec struct {
 	Store      func() (backend.Backend, error) // default: defaultStore
 	Unreadable func() string                   // non-empty: why the live login cannot be read
 	Extra      func() []*cobra.Command         // commands of this provider only
+	Warn       func() string                   // non-empty: a warning for `use` and `current`
 }
 
 // providerSpecs lists every provider. A new provider adds one line here.
-var providerSpecs = []providerSpec{codexSpec}
+var providerSpecs = []providerSpec{codexSpec, grokSpec}
 
 func init() {
 	for _, s := range providerSpecs {
@@ -54,6 +55,16 @@ func defaultStore() (backend.Backend, error) {
 		return nil, fmt.Errorf("backend not available: %w", err)
 	}
 	return b, nil
+}
+
+// warn prints the warning of the provider, when it has one, to stderr.
+func (s providerSpec) warn() {
+	if s.Warn == nil {
+		return
+	}
+	if w := s.Warn(); w != "" {
+		fmt.Fprintln(os.Stderr, "Warning: "+w)
+	}
 }
 
 func (s providerSpec) store() (backend.Backend, error) {
@@ -353,6 +364,7 @@ func newProviderUseCmd(s providerSpec) *cobra.Command {
 				return err
 			}
 			fmt.Printf("%s now using %q: %s\n", title(p), label, describeProfile(reg.Profiles[label]))
+			s.warn()
 			return nil
 		},
 	}
@@ -506,6 +518,7 @@ func newProviderCurrentCmd(s providerSpec) *cobra.Command {
 					fmt.Printf("Profile: %s\n", reg.Active)
 				}
 			}
+			s.warn()
 			return nil
 		},
 	}
