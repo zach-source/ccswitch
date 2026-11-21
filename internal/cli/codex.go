@@ -16,6 +16,7 @@ import (
 	"github.com/zach-source/ccswitch/internal/browser"
 	"github.com/zach-source/ccswitch/internal/codex"
 	"github.com/zach-source/ccswitch/internal/config"
+	"github.com/zach-source/ccswitch/internal/provider"
 	"golang.org/x/term"
 )
 
@@ -27,6 +28,14 @@ func init() {
 // registry, alongside sequence.json.
 func codexRegistryPath() string {
 	return filepath.Join(backupDir(), "codex.json")
+}
+
+// codexProvider is Codex behind the provider seam.
+func codexProvider() provider.Provider {
+	return codex.Provider{
+		RegistryFile: codexRegistryPath(),
+		LoginLock:    filepath.Join(backupDir(), "codex-login.lock"),
+	}
 }
 
 func newCodexCmd() *cobra.Command {
@@ -142,7 +151,7 @@ func newCodexAddCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			data, err := codex.ReadLive()
+			data, err := codexProvider().ReadLive()
 			if errors.Is(err, codex.ErrNoLiveLogin) {
 				return fmt.Errorf("no Codex login at %s — run `codex login` first", codex.AuthPath())
 			}
@@ -212,8 +221,7 @@ func newCodexLoginCmd() *cobra.Command {
 // and opens no browser. It checks that the login belongs to email
 // and saves nothing when it does not. It saves reg and returns the new login.
 func codexSignInAndSave(ctx context.Context, b backend.Backend, reg *codex.Registry, email, label string, manual bool) ([]byte, error) {
-	blob, err := codex.SignIn(ctx, filepath.Join(backupDir(), "codex-login.lock"),
-		func(d codex.DeviceLogin) { announceCodexLogin(email, d, manual) })
+	blob, err := codexProvider().Login(ctx, func(d provider.LoginPrompt) { announceCodexLogin(email, d, manual) })
 	if err != nil {
 		return nil, err
 	}
@@ -311,8 +319,8 @@ func readAPIKey(in *os.File, prompt io.Writer) (string, error) {
 
 // announceCodexLogin tells the user how to finish the sign-in. It opens the
 // address in the Chrome profile of email when one exists, unless manual is set.
-func announceCodexLogin(email string, d codex.DeviceLogin, manual bool) {
-	if d.BrowserFallback && d.Code == "" {
+func announceCodexLogin(email string, d provider.LoginPrompt, manual bool) {
+	if d.Browser && d.Code == "" {
 		fmt.Printf("Codex opened your default browser. Sign in as %s there.\n", email)
 		return
 	}
@@ -420,7 +428,7 @@ func useCodexProfile(ctx context.Context, b, local backend.Backend, reg *codex.R
 		return fmt.Errorf("Codex profile %q holds no credential — re-capture it with `ccswitch codex add %s`", label, label)
 	}
 
-	if err := codex.WriteLive(target); err != nil {
+	if err := codexProvider().WriteLive(target); err != nil {
 		return err
 	}
 	reg.Active = label
@@ -469,8 +477,8 @@ func codexFresher(ctx context.Context, store, local backend.Backend, key string)
 // switch continues with a warning. If that fails too, the live file is the
 // only copy, so the caller must not overwrite it.
 func snapshotLiveCodex(ctx context.Context, b, local backend.Backend, reg *codex.Registry) error {
-	live, err := codex.ReadLive()
-	if errors.Is(err, codex.ErrNoLiveLogin) {
+	live, err := codexProvider().ReadLive()
+	if errors.Is(err, provider.ErrNoLiveLogin) {
 		return nil
 	}
 	if err != nil {
@@ -515,7 +523,7 @@ func newCodexCurrentCmd() *cobra.Command {
 				fmt.Printf("Codex is keyring-backed (cli_auth_credentials_store = %q); ccswitch cannot read it.\n", store)
 				return nil
 			}
-			data, err := codex.ReadLive()
+			data, err := codexProvider().ReadLive()
 			if errors.Is(err, codex.ErrNoLiveLogin) {
 				fmt.Printf("No Codex login at %s\n", codex.AuthPath())
 				return nil
@@ -559,7 +567,7 @@ func revokeRemovedCodex(ctx context.Context, reg *codex.Registry, label string, 
 	if err != nil || codex.Describe(blob).Mode == "apikey" || !codex.HasRefreshToken(blob) {
 		return
 	}
-	live, err := codex.ReadLive()
+	live, err := codexProvider().ReadLive()
 	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
 		fmt.Fprintf(os.Stderr, "Warning: could not read the live Codex login, so ccswitch did not revoke %q: %v\n", label, err)
 		return

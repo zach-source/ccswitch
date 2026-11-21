@@ -98,7 +98,7 @@ func runCodexAutoswitch(ctx context.Context, out io.Writer, threshold float64, c
 	if err != nil {
 		return err
 	}
-	live, err := codex.ReadLive()
+	live, err := codexProvider().ReadLive()
 	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
 		return fmt.Errorf("read the live Codex login: %w", err)
 	}

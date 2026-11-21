@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/codex"
+	"github.com/zach-source/ccswitch/internal/provider"
 )
 
 // codexTokenRenewBefore is how long before the access token expires that
@@ -94,15 +95,15 @@ func renewCodexBlob(ctx context.Context, store, local backend.Backend, tgt codex
 	if err != nil {
 		return nil, false, err
 	}
-	exp, ok := codex.AccessTokenExpiry(blob)
+	exp, ok := codexProvider().Expiry(blob)
 	if (ok && time.Until(exp) >= codexTokenRenewBefore) || (!ok && tgt.skipUnknown) {
 		return blob, false, nil
 	}
-	fresh, err := codex.Refresh(ctx, blob)
+	fresh, err := codexProvider().Refresh(ctx, blob)
 	if err != nil {
 		// A temporary failure leaves the refresh token unspent. Keep the
 		// current access token while it has more than an hour left.
-		if !errors.Is(err, codex.ErrSessionEnded) && ok && time.Until(exp) > time.Hour {
+		if !errors.Is(err, provider.ErrSessionEnded) && ok && time.Until(exp) > time.Hour {
 			fmt.Fprintf(os.Stderr, "Warning: could not renew the %s (%v); the current access token is valid until %s.\n",
 				tgt.what, err, exp.Local().Format("2006-01-02 15:04"))
 			return blob, false, nil
@@ -170,7 +171,7 @@ func renewCodexSessions(ctx context.Context, store, local backend.Backend, log *
 }
 
 func untilText(blob []byte) string {
-	if exp, ok := codex.AccessTokenExpiry(blob); ok {
+	if exp, ok := codexProvider().Expiry(blob); ok {
 		return exp.Format("2006-01-02")
 	}
 	return "unknown"
@@ -181,8 +182,7 @@ func codexTokenCreate(cmd *cobra.Command, email string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := codex.SignIn(cmd.Context(), filepath.Join(backupDir(), "codex-login.lock"),
-		func(d codex.DeviceLogin) { announceCodexLogin(email, d, false) })
+	blob, err := codexProvider().Login(cmd.Context(), func(d provider.LoginPrompt) { announceCodexLogin(email, d, false) })
 	if err != nil {
 		return err
 	}

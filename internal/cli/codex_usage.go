@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/codex"
+	"github.com/zach-source/ccswitch/internal/provider"
 )
 
 // Usage row statuses.
@@ -90,8 +91,8 @@ func loadCodexUsage(ctx context.Context, now time.Time) ([]codexUsageRow, error)
 	if renew {
 		defer unlock()
 	}
-	live, err := codex.ReadLive()
-	if err != nil && !errors.Is(err, codex.ErrNoLiveLogin) {
+	live, err := codexProvider().ReadLive()
+	if err != nil && !errors.Is(err, provider.ErrNoLiveLogin) {
 		return nil, fmt.Errorf("read the live Codex login: %w", err)
 	}
 	return collectCodexUsage(ctx, reg, store, local, live, now, renew), nil
@@ -134,10 +135,10 @@ func collectCodexUsage(ctx context.Context, reg *codex.Registry, store, local ba
 // is near expiry. It returns blob when the renewal fails or is not needed, so
 // the row keeps its status. The live profile never comes here: Codex renews it.
 func renewStaleCodex(ctx context.Context, store, local backend.Backend, label string, blob []byte, readErr error, now time.Time) []byte {
-	if readErr != nil || codex.Describe(blob).Mode == "apikey" {
+	if readErr != nil || codexProvider().Describe(blob).Mode == "apikey" {
 		return blob
 	}
-	if exp, ok := codex.AccessTokenExpiry(blob); !ok || exp.Sub(now) >= codexTokenRenewBefore {
+	if exp, ok := codexProvider().Expiry(blob); !ok || exp.Sub(now) >= codexTokenRenewBefore {
 		return blob
 	}
 	if fresh, _, err := renewCodexProfile(ctx, store, local, label); err == nil {
@@ -154,12 +155,12 @@ func codexUsageFor(ctx context.Context, p codex.Profile, isLive bool, blob []byt
 		row.Status = usageUnavailable
 		return row
 	}
-	id := codex.Describe(blob)
-	if id.Mode == "apikey" {
+	prov := codexProvider()
+	if prov.Describe(blob).Mode == "apikey" {
 		row.Status = usageAPIKey
 		return row
 	}
-	if exp, ok := codex.AccessTokenExpiry(blob); ok && !exp.After(now) {
+	if exp, ok := prov.Expiry(blob); ok && !exp.After(now) {
 		row.Status = usageStale
 		row.LastUsed, _ = codex.LastRefresh(blob)
 		if row.LastUsed.IsZero() {
@@ -167,15 +168,9 @@ func codexUsageFor(ctx context.Context, p codex.Profile, isLive bool, blob []byt
 		}
 		return row
 	}
-	var tokens struct {
-		Tokens struct {
-			AccessToken string `json:"access_token"`
-		} `json:"tokens"`
-	}
-	_ = json.Unmarshal(blob, &tokens)
-	u, err := codex.FetchUsage(ctx, tokens.Tokens.AccessToken, id.AccountID)
+	u, err := prov.FetchUsage(ctx, blob)
 	switch {
-	case errors.Is(err, codex.ErrUsageRejected):
+	case errors.Is(err, provider.ErrUsageRejected):
 		row.Status = usageExpired
 	case err != nil:
 		row.Status = usageUnavailable

@@ -115,7 +115,7 @@ func loginCodexProfile(ctx context.Context, store backend.Backend, reg *codex.Re
 	if !r.Live {
 		return nil
 	}
-	if err := codex.WriteLive(blob); err != nil {
+	if err := codexProvider().WriteLive(blob); err != nil {
 		return err
 	}
 	reg.Active = r.Label

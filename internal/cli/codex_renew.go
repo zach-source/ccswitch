@@ -11,6 +11,7 @@ import (
 
 	"github.com/zach-source/ccswitch/internal/backend"
 	"github.com/zach-source/ccswitch/internal/codex"
+	"github.com/zach-source/ccswitch/internal/provider"
 )
 
 // renewCodexProfile returns the stored credential of label. It renews the
@@ -20,7 +21,7 @@ import (
 func renewCodexProfile(ctx context.Context, store, local backend.Backend, label string) (blob []byte, renewed bool, err error) {
 	return renewCodexBlob(ctx, store, local, codexRenewTarget{
 		lock:        "codex-profile-" + strings.ReplaceAll(label, "/", "_") + ".lock",
-		key:         codex.CredKey(label),
+		key:         codexProvider().CredKeyPrefix() + label,
 		what:        fmt.Sprintf("Codex profile %q", label),
 		again:       "ccswitch login --provider codex --only " + label,
 		skipUnknown: true,
@@ -37,11 +38,11 @@ func renewCodexProfiles(ctx context.Context, store, local backend.Backend, log *
 	}
 	// An unreadable live login could be any profile, so renew none.
 	liveLabel := ""
-	live, err := codex.ReadLive()
+	live, err := codexProvider().ReadLive()
 	switch {
 	case err == nil:
 		liveLabel, _ = codex.MatchProfile(reg, live)
-	case !errors.Is(err, codex.ErrNoLiveLogin):
+	case !errors.Is(err, provider.ErrNoLiveLogin):
 		return 0, fmt.Errorf("read the live Codex login: %w", err)
 	}
 	renewed, failed := 0, 0
@@ -52,7 +53,7 @@ func renewCodexProfiles(ctx context.Context, store, local backend.Backend, log *
 		_, did, err := renewCodexProfile(ctx, store, local, label)
 		switch {
 		case errors.Is(err, backend.ErrNotFound):
-		case errors.Is(err, codex.ErrSessionEnded):
+		case errors.Is(err, provider.ErrSessionEnded):
 			log.Warn("Codex profile session ended; run `ccswitch login --provider codex --only "+label+"`", "label", label)
 		case err != nil:
 			failed++
@@ -77,7 +78,7 @@ func syncLiveCodex(ctx context.Context, store, local backend.Backend) {
 		fmt.Fprintf(os.Stderr, "Warning: could not read the Codex registry: %v\n", err)
 		return
 	}
-	live, err := codex.ReadLive()
+	live, err := codexProvider().ReadLive()
 	if err != nil {
 		return
 	}
