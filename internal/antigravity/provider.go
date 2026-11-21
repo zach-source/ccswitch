@@ -101,28 +101,48 @@ func (Provider) Expiry(b []byte) (time.Time, bool) {
 // newer copy of a profile wins.
 func (p Provider) LastRefresh(b []byte) (time.Time, bool) { return p.Expiry(b) }
 
-// Refresh is not needed. Google refresh tokens do not rotate, and a usage run
-// renews the access token inside agy.
-func (Provider) Refresh(context.Context, []byte) ([]byte, error) {
+// Refresh renews the access token by running `agy -p /usage` in an isolated
+// home: agy renews the token itself during that run. Google refresh tokens do
+// not rotate, so a stored profile is safe to renew. ccswitch never calls this
+// for the live login. It returns ErrNotSupported when agy left the login
+// unchanged, so the caller keeps the stored copy.
+func (Provider) Refresh(ctx context.Context, blob []byte) ([]byte, error) {
+	out, runErr, changed, err := runUsage(ctx, blob)
+	switch {
+	case err != nil:
+		return nil, err
+	case changed != nil:
+		return changed, nil
+	case strings.Contains(strings.ToLower(string(out)), "accounts.google.com"):
+		return nil, provider.ErrSessionEnded
+	case runErr != nil:
+		return nil, fmt.Errorf("agy /usage: %w", runErr)
+	}
 	return nil, provider.ErrNotSupported
 }
 
 func (Provider) Revoke(context.Context, []byte) error { return provider.ErrNotSupported }
 
-// FetchUsage runs `agy -p /usage` in an isolated home that holds blob. The
-// returned bytes are non-nil when agy changed the login.
-func (Provider) FetchUsage(ctx context.Context, blob []byte) (provider.Usage, []byte, error) {
+// runUsage runs `agy -p /usage` in an isolated home that holds blob. It
+// returns the output, the run error and the login when agy changed it. err is
+// a failure to set up the isolated home.
+func runUsage(ctx context.Context, blob []byte) (out []byte, runErr error, changed []byte, err error) {
 	ctx, cancel := context.WithTimeout(ctx, usageTimeout)
 	defer cancel()
-	var out []byte
-	var runErr error
-	changed, err := withIsolatedHome(ctx, blob, func(home string) error {
+	changed, err = withIsolatedHome(ctx, blob, func(home string) error {
 		cmd := exec.CommandContext(ctx, agyBin, "-p", "/usage")
 		cmd.Dir = home
 		cmd.Env = append(os.Environ(), "HOME="+home)
 		out, runErr = cmd.Output()
 		return nil
 	})
+	return out, runErr, changed, err
+}
+
+// FetchUsage runs `agy -p /usage` in an isolated home that holds blob. The
+// returned bytes are non-nil when agy changed the login.
+func (Provider) FetchUsage(ctx context.Context, blob []byte) (provider.Usage, []byte, error) {
+	out, runErr, changed, err := runUsage(ctx, blob)
 	if err != nil {
 		return provider.Usage{}, nil, err
 	}

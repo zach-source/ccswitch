@@ -257,3 +257,17 @@ func TestMatch_ByEmail(t *testing.T) {
 		t.Error("two profiles with one email match nothing")
 	}
 }
+
+func TestRefresh_ReturnsRenewedLoginOrNotSupported(t *testing.T) {
+	setup(t)
+	t.Setenv("FAKE_WANT", "STORED")
+	t.Setenv("FAKE_NEW", "RENEWED")
+	got, err := Provider{}.Refresh(context.Background(), []byte("STORED"))
+	if err != nil || string(got) != "RENEWED" {
+		t.Fatalf("Refresh = %q, %v", got, err)
+	}
+	t.Setenv("FAKE_NEW", "")
+	if _, err := (Provider{}).Refresh(context.Background(), []byte("STORED")); !errors.Is(err, provider.ErrNotSupported) {
+		t.Fatalf("an unchanged login: err = %v, want ErrNotSupported", err)
+	}
+}
