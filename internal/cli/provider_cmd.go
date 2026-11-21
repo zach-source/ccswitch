@@ -30,7 +30,7 @@ type providerSpec struct {
 }
 
 // providerSpecs lists every provider. A new provider adds one line here.
-var providerSpecs = []providerSpec{codexSpec}
+var providerSpecs = []providerSpec{codexSpec, antigravitySpec}
 
 func init() {
 	for _, s := range providerSpecs {
