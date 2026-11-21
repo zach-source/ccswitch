@@ -254,11 +254,9 @@ func writeUsageText(w io.Writer, p provider.Provider, rows []usageRow, now time.
 }
 
 // windowLabel names a window like the Claude section does: 7d, not weekly.
+// A provider label keeps its group, for example "Gemini 7d".
 func windowLabel(w provider.Window) string {
-	if w.Seconds == 604800 {
-		return "7d"
-	}
-	return w.Name()
+	return strings.Replace(w.Name(), "weekly", "7d", 1)
 }
 
 // usageNote is the one-line text for a row without bars.

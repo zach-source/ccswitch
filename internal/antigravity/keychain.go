@@ -80,12 +80,13 @@ func withIsolatedHome(ctx context.Context, blob []byte, fn func(ctx context.Cont
 	if err := security(ctx, env, "create-keychain", "-p", "", kc); err != nil {
 		return nil, err
 	}
+	// create-keychain leaves the new keychain unlocked. An unlock-keychain
+	// with an empty password fails on macOS ("passphrase not correct").
 	// Clean up even when ctx is done.
 	defer func() { _ = security(context.Background(), env, "delete-keychain", kc) }()
 	for _, args := range [][]string{
 		{"default-keychain", "-d", "user", "-s", kc},
 		{"list-keychains", "-d", "user", "-s", kc},
-		{"unlock-keychain", "-p", "", kc},
 		{"set-keychain-settings", kc},
 	} {
 		if err := security(ctx, env, args...); err != nil {

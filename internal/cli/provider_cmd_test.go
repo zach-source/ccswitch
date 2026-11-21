@@ -119,3 +119,20 @@ func TestProviderCmd_SecondProvider(t *testing.T) {
 		t.Errorf("the live login a must not be revoked: %v", revoked)
 	}
 }
+
+func TestWindowLabelKeepsProviderGroup(t *testing.T) {
+	for _, c := range []struct {
+		w    provider.Window
+		want string
+	}{
+		{provider.Window{Seconds: 604800}, "7d"},
+		{provider.Window{Seconds: 18000}, "5h"},
+		{provider.Window{Seconds: 604800, Label: "weekly"}, "7d"},
+		{provider.Window{Seconds: 604800, Label: "Gemini weekly"}, "Gemini 7d"},
+		{provider.Window{Seconds: 18000, Label: "Claude/GPT 5h"}, "Claude/GPT 5h"},
+	} {
+		if got := windowLabel(c.w); got != c.want {
+			t.Errorf("windowLabel(%+v) = %q, want %q", c.w, got, c.want)
+		}
+	}
+}
