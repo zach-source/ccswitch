@@ -373,6 +373,19 @@ echo "$GROK_HOME" > "$CCSWITCH_TEST_HOME_FILE"
 	}
 }
 
+func TestSignInRealOutput(t *testing.T) {
+	fakeGrok(t, `printf '\nTo sign in, open this URL in your browser:\n\n  https://accounts.x.ai/oauth2/device?user_code=ABCD-1234\n\nConfirm this code in your browser:\n\n  ABCD-1234\n\n\033[90mOnly continue with a code you requested. Dont share it with anyone.\033[0m\n\nWaiting for authorization...\n'
+printf '{"k":{"key":"x"}}' > "$GROK_HOME/auth.json"
+`)
+	var prompts []provider.LoginPrompt
+	if _, err := SignIn(context.Background(), func(p provider.LoginPrompt) { prompts = append(prompts, p) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(prompts) != 1 || prompts[0].URL != "https://accounts.x.ai/oauth2/device?user_code=ABCD-1234" || prompts[0].Code != "ABCD-1234" {
+		t.Fatalf("prompts = %+v", prompts)
+	}
+}
+
 func TestSignInFailureRemovesHome(t *testing.T) {
 	seen := filepath.Join(t.TempDir(), "home")
 	t.Setenv("CCSWITCH_TEST_HOME_FILE", seen)
