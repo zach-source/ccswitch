@@ -7,13 +7,13 @@ package antigravity
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,10 +31,7 @@ type Provider struct {
 	RegistryFile string
 }
 
-var (
-	_ provider.Provider      = Provider{}
-	_ provider.IdentityLogin = Provider{}
-)
+var _ provider.Provider = Provider{}
 
 func (Provider) Name() string           { return "antigravity" }
 func (Provider) CredKeyPrefix() string  { return "Antigravity-Account-" }
@@ -49,25 +46,60 @@ func (Provider) WriteLive(b []byte) error {
 	return keychain.AddGenericPassword(securityBin, nil, keychainService, keychainAccount, b, "")
 }
 
-// Describe knows nothing: the login holds no email. The registry keeps what
-// the user gave at add time, and Login reads the email from the agy log.
-func (Provider) Describe([]byte) provider.Identity { return provider.Identity{} }
+// keyringPrefix starts the value go-keyring wrote.
+const keyringPrefix = "go-keyring-base64:"
 
-// Match names the registry's active profile. The live login changes whenever
-// agy refreshes it, so its bytes match no stored copy for long, and Match does
-// not read stored copies. The rule is therefore: a live login belongs to the
-// profile that `add` or `use` made active last. Signing in to another account
-// inside agy by hand breaks this rule; run `add` after that.
-func (Provider) Match(reg *provider.Registry, live []byte) (string, bool) {
-	if _, ok := reg.Profiles[reg.Active]; ok && len(live) > 0 {
-		return reg.Active, true
-	}
-	return "", false
+// payload is the part of the decoded login that ccswitch reads. The rest of
+// the login stays opaque.
+type payload struct {
+	Token struct {
+		Expiry string `json:"expiry"`
+	} `json:"token"`
+	AuthMethod   string `json:"auth_method"`
+	IDTokenEmail string `json:"id_token_email"`
 }
 
-// Expiry is unknown: the token payload format is not verified.
-func (Provider) Expiry([]byte) (time.Time, bool)      { return time.Time{}, false }
-func (Provider) LastRefresh([]byte) (time.Time, bool) { return time.Time{}, false }
+// decode reads the payload. A login that does not decode gives the zero value.
+func decode(blob []byte) payload {
+	var p payload
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(string(blob), keyringPrefix))
+	if err == nil {
+		_ = json.Unmarshal(raw, &p)
+	}
+	return p
+}
+
+func (Provider) Describe(b []byte) provider.Identity {
+	p := decode(b)
+	return provider.Identity{Email: p.IDTokenEmail, Mode: p.AuthMethod}
+}
+
+// Match finds the one profile with the email of the live login.
+func (p Provider) Match(reg *provider.Registry, live []byte) (string, bool) {
+	email := p.Describe(live).Email
+	if email == "" {
+		return "", false
+	}
+	var match string
+	var n int
+	for label, pr := range reg.Profiles {
+		if strings.EqualFold(pr.Email, email) {
+			match = label
+			n++
+		}
+	}
+	return match, n == 1
+}
+
+// Expiry is the expiry of the access token.
+func (Provider) Expiry(b []byte) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339Nano, decode(b).Token.Expiry)
+	return t, err == nil
+}
+
+// LastRefresh is the expiry too: a later one means a later refresh, so the
+// newer copy of a profile wins.
+func (p Provider) LastRefresh(b []byte) (time.Time, bool) { return p.Expiry(b) }
 
 // Refresh is not needed. Google refresh tokens do not rotate, and a usage run
 // renews the access token inside agy.
@@ -156,18 +188,7 @@ func shortWindow(w string) (string, int) {
 
 // Login runs agy on the user's terminal in an isolated home with an empty
 // keychain, then returns the login agy saved there.
-func (p Provider) Login(ctx context.Context, onReady func(provider.LoginPrompt)) ([]byte, error) {
-	blob, _, err := p.LoginIdentity(ctx, onReady)
-	return blob, err
-}
-
-// emailLine is the agy log line that names the signed-in account.
-var emailLine = regexp.MustCompile(`applyAuthResult: email=([^,\s]+)`)
-
-// LoginIdentity is Login that also reads the email from the agy log, since
-// the login itself holds none.
-func (Provider) LoginIdentity(ctx context.Context, onReady func(provider.LoginPrompt)) ([]byte, provider.Identity, error) {
-	var email string
+func (Provider) Login(ctx context.Context, onReady func(provider.LoginPrompt)) ([]byte, error) {
 	var runErr error
 	blob, err := withIsolatedHome(ctx, nil, func(home string) error {
 		onReady(provider.LoginPrompt{Message: "agy opens now. Sign in there, then exit agy (Ctrl-C or /exit)."})
@@ -179,33 +200,16 @@ func (Provider) LoginIdentity(ctx context.Context, onReady func(provider.LoginPr
 		cmd.Dir, cmd.Env = home, append(os.Environ(), "HOME="+home)
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		runErr = cmd.Run()
-		email = logEmail(home)
 		return nil
 	})
 	if err != nil {
-		return nil, provider.Identity{}, err
+		return nil, err
 	}
 	if len(blob) == 0 {
 		if runErr != nil {
-			return nil, provider.Identity{}, fmt.Errorf("agy ended without a login: %w", runErr)
+			return nil, fmt.Errorf("agy ended without a login: %w", runErr)
 		}
-		return nil, provider.Identity{}, errors.New("agy ended without a login — nothing was saved")
+		return nil, errors.New("agy ended without a login — nothing was saved")
 	}
-	return blob, provider.Identity{Email: email}, nil
-}
-
-// logEmail returns the last signed-in email in the agy logs under home, or "".
-func logEmail(home string) string {
-	logs, _ := filepath.Glob(filepath.Join(home, ".gemini", "antigravity-cli", "log", "*.log"))
-	var email string
-	for _, l := range logs {
-		data, err := os.ReadFile(l)
-		if err != nil {
-			continue
-		}
-		if m := emailLine.FindAllSubmatch(data, -1); len(m) > 0 {
-			email = string(m[len(m)-1][1])
-		}
-	}
-	return email
+	return blob, nil
 }

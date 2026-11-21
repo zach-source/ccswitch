@@ -2,6 +2,7 @@ package antigravity
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -46,9 +47,7 @@ if [ "$1" = "-p" ]; then
 	[ -z "$FAKE_NEW" ] || printf '%s' "$FAKE_NEW" > "$store/item"
 	exit 0
 fi
-printf '%s' "go-keyring-base64:SIGNEDIN" > "$store/item"
-mkdir -p "$HOME/.gemini/antigravity-cli/log"
-echo "x applyAuthResult: email=me@example.com, authMethod=oauth" > "$HOME/.gemini/antigravity-cli/log/a.log"
+printf '%s' "$FAKE_LOGIN" > "$store/item"
 `
 
 // setup points the tool paths at fake scripts and gives the test its own HOME.
@@ -178,15 +177,46 @@ func TestWithIsolatedHome_CleansUpOnError(t *testing.T) {
 	}
 }
 
-func TestLogin_ReadsItemAndEmail(t *testing.T) {
+// login builds a login value in the shape agy writes.
+func login(email, expiry string) string {
+	j := `{"token":{"access_token":"a","refresh_token":"r","expiry":"` + expiry + `"},"auth_method":"oauth","id_token_email":"` + email + `"}`
+	return keyringPrefix + base64.StdEncoding.EncodeToString([]byte(j))
+}
+
+func TestDescribeAndExpiry(t *testing.T) {
+	p := Provider{}
+	b := []byte(login("me@example.com", "2026-11-21T07:36:30.123456789+01:00"))
+	if id := p.Describe(b); id.Email != "me@example.com" || id.Mode != "oauth" {
+		t.Errorf("Describe = %+v", id)
+	}
+	exp, ok := p.Expiry(b)
+	if !ok || !exp.Equal(time.Date(2026, 11, 21, 6, 36, 30, 123456789, time.UTC)) {
+		t.Errorf("Expiry = %v, %v", exp, ok)
+	}
+	if lr, _ := p.LastRefresh(b); !lr.Equal(exp) {
+		t.Errorf("LastRefresh = %v, want the expiry", lr)
+	}
+	for _, bad := range []string{"", "opaque", keyringPrefix + "!!!", keyringPrefix + base64.StdEncoding.EncodeToString([]byte("x"))} {
+		if id := p.Describe([]byte(bad)); id != (provider.Identity{}) {
+			t.Errorf("Describe(%q) = %+v, want empty", bad, id)
+		}
+		if _, ok := p.Expiry([]byte(bad)); ok {
+			t.Errorf("Expiry(%q) ok, want false", bad)
+		}
+	}
+}
+
+func TestLogin_ReadsItem(t *testing.T) {
 	setup(t)
+	want := login("me@example.com", "2026-11-21T07:36:30Z")
+	t.Setenv("FAKE_LOGIN", want)
 	var prompt provider.LoginPrompt
-	blob, id, err := Provider{}.LoginIdentity(context.Background(), func(d provider.LoginPrompt) { prompt = d })
+	blob, err := Provider{}.Login(context.Background(), func(d provider.LoginPrompt) { prompt = d })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(blob) != "go-keyring-base64:SIGNEDIN" || id.Email != "me@example.com" {
-		t.Fatalf("blob = %q, id = %+v", blob, id)
+	if string(blob) != want || (Provider{}).Describe(blob).Email != "me@example.com" {
+		t.Fatalf("blob = %q", blob)
 	}
 	if prompt.Message == "" {
 		t.Error("onReady got no message")
@@ -206,17 +236,24 @@ func TestLogin_NoItemIsError(t *testing.T) {
 	}
 }
 
-func TestMatch_UsesActiveProfile(t *testing.T) {
-	reg := &provider.Registry{Active: "work", Profiles: map[string]provider.Profile{"work": {Label: "work"}}}
+func TestMatch_ByEmail(t *testing.T) {
+	reg := &provider.Registry{Profiles: map[string]provider.Profile{
+		"work":     {Label: "work", Email: "Me@Example.com"},
+		"personal": {Label: "personal", Email: "other@example.com"},
+	}}
 	p := Provider{}
-	if l, ok := p.Match(reg, []byte("any bytes")); !ok || l != "work" {
+	live := []byte(login("me@example.com", "2026-11-21T07:36:30Z"))
+	if l, ok := p.Match(reg, live); !ok || l != "work" {
 		t.Errorf("Match = %q, %v", l, ok)
 	}
-	if _, ok := p.Match(reg, nil); ok {
-		t.Error("an empty live login matches nothing")
+	if _, ok := p.Match(reg, []byte(login("nobody@example.com", "x"))); ok {
+		t.Error("an unknown email matches nothing")
 	}
-	reg.Active = "gone"
-	if _, ok := p.Match(reg, []byte("x")); ok {
-		t.Error("an active label with no profile matches nothing")
+	if _, ok := p.Match(reg, []byte("opaque")); ok {
+		t.Error("an unreadable login matches nothing")
+	}
+	reg.Profiles["dup"] = provider.Profile{Label: "dup", Email: "me@example.com"}
+	if _, ok := p.Match(reg, live); ok {
+		t.Error("two profiles with one email match nothing")
 	}
 }

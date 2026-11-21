@@ -245,18 +245,11 @@ func newProviderLoginCmd(s providerSpec) *cobra.Command {
 // browser. It checks that the login belongs to email and saves nothing when it
 // does not. It saves reg and returns the new login.
 func signInAndSave(ctx context.Context, p provider.Provider, b backend.Backend, reg *provider.Registry, email, label string, manual bool) ([]byte, error) {
-	onReady := func(d provider.LoginPrompt) { announceLogin(p, email, d, manual) }
-	var blob []byte
-	var id provider.Identity
-	var err error
-	if il, ok := p.(provider.IdentityLogin); ok {
-		blob, id, err = il.LoginIdentity(ctx, onReady)
-	} else if blob, err = p.Login(ctx, onReady); err == nil {
-		id = p.Describe(blob)
-	}
+	blob, err := p.Login(ctx, func(d provider.LoginPrompt) { announceLogin(p, email, d, manual) })
 	if err != nil {
 		return nil, err
 	}
+	id := p.Describe(blob)
 	if !strings.EqualFold(id.Email, email) {
 		who := id.Email
 		if who == "" {

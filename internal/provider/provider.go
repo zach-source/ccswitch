@@ -130,10 +130,3 @@ type Provider interface {
 	// return ErrNotSupported.
 	Login(ctx context.Context, onReady func(LoginPrompt)) ([]byte, error)
 }
-
-// IdentityLogin is an optional capability of a Provider whose login bytes do
-// not name the account. LoginIdentity signs in like Login and also returns who
-// signed in, from another source such as the CLI's log.
-type IdentityLogin interface {
-	LoginIdentity(ctx context.Context, onReady func(LoginPrompt)) ([]byte, Identity, error)
-}
