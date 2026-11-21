@@ -9,13 +9,11 @@ package keychain
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"os/user"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -104,37 +102,17 @@ func (b *Backend) Write(_ context.Context, key string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	line := fmt.Sprintf("add-generic-password -U -s %q -a %q -X %s\n", key, acct, hex.EncodeToString(data))
-	// security -i cuts each line at 4096 bytes and runs the first part, which
-	// saves a cut-off value. Refuse a value that does not fit.
-	// ponytail: 4000 leaves a margin under the 4096 cut.
-	if len(line) > 4000 {
-		return fmt.Errorf("keychain backend: write %q: the value is %d bytes, more than the keychain backend can write (about 1.9 KB)", key, len(data))
-	}
-	if err := runSecurityInteractive(line); err != nil {
+	if err := AddGenericPassword(securityBin, nil, key, acct, data, ""); err != nil {
 		return fmt.Errorf("keychain backend: write %q: %w", key, err)
 	}
 	return nil
 }
 
-// hexRun matches a run of hex long enough to be part of a secret.
-var hexRun = regexp.MustCompile(`[0-9a-fA-F]{16,}`)
+// securityBin is the Apple platform tool every keychain call goes through.
+const securityBin = "/usr/bin/security"
 
-// runSecurityInteractive feeds one command line to `security -i`. security
-// exits 0 even when the command fails, so any stderr output is the error.
-func runSecurityInteractive(line string) error {
-	cmd := exec.Command("/usr/bin/security", "-i")
-	cmd.Stdin = strings.NewReader(line)
-	var stderr bytes.Buffer
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	if msg := strings.TrimSpace(stderr.String()); msg != "" {
-		// security echoes a bad command line, which can hold the hex secret.
-		return errors.New(hexRun.ReplaceAllString(msg, "<hex>"))
-	}
-	return err
-}
+// runSecurityInteractive feeds one command line to `security -i`.
+func runSecurityInteractive(line string) error { return runSecurity(securityBin, nil, line) }
 
 // Delete removes the keychain item for key via /usr/bin/security. Returns nil
 // if no item exists (idempotent).
